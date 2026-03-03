@@ -3,7 +3,7 @@
         "use strict";
     
         var PLUGIN_ID = "nr-grouped-flows";
-        var PLUGIN_VERSION = "0.1.20";
+        var PLUGIN_VERSION = "0.1.23";
         var ORIGINAL_UL_ID = "red-ui-workspace-tabs";
         var CONTAINER_ID = "nr-grouped-flows";
         var GROUPS_UL_ID = "nr-grouped-flows-groups";
@@ -1314,7 +1314,7 @@
                 state.originalWrapper = originalWrapper;
     
                 if (!state.container || !state.container.length) {
-                    state.container = $('<div id="' + CONTAINER_ID + '" class="nr-grouped-workspace-tabs"></div>');
+                    state.container = $('<div id="' + CONTAINER_ID + '" class="nr-grouped-flows"></div>');
                     state.container.append('<ul id="' + GROUPS_UL_ID + '"></ul>');
                     state.container.append('<ul id="' + FLOWS_UL_ID + '"></ul>');
     
@@ -1324,6 +1324,9 @@
                         id: GROUPS_UL_ID,
                         scrollable: true,
                         sortable: true,
+                        addButton: addFlowEnabled() ? "core:add-flow" : undefined,
+                        addButtonCaption: t("workspace.addFlow", "Add flow"),
+                        menu: buildFlowMenu,
                         onreorder: function(oldOrder, newOrder) {
                             debug("group onreorder", {
                                 oldOrder: oldOrder,
@@ -1353,9 +1356,6 @@
                         id: FLOWS_UL_ID,
                         scrollable: true,
                         sortable: true,
-                        addButton: addFlowEnabled() ? "core:add-flow" : undefined,
-                        addButtonCaption: t("workspace.addFlow", "Add flow"),
-                        menu: buildFlowMenu,
                         onreorder: function(oldOrder, newOrder) {
                             debug("flow onreorder", {
                                 oldOrder: oldOrder,
@@ -1586,11 +1586,11 @@
     </script>
     
     <style>
-    #nr-grouped-workspace-tabs {
+    #nr-grouped-flows {
         display: none;
     }
-    
-    #red-ui-workspace.nr-grouped-workspace-tabs-enabled #nr-grouped-workspace-tabs {
+
+    #red-ui-workspace.nr-grouped-flows-enabled #nr-grouped-flows {
         position: absolute;
         top: 0;
         left: 0;
@@ -1599,36 +1599,36 @@
         display: flex;
         flex-direction: column;
     }
-    
-    #nr-grouped-workspace-tabs > .red-ui-tabs {
+
+    #nr-grouped-flows > .red-ui-tabs {
         margin-bottom: 0;
     }
-    
-    #nr-grouped-workspace-tabs > .red-ui-tabs + .red-ui-tabs {
+
+    #nr-grouped-flows > .red-ui-tabs + .red-ui-tabs {
         margin-top: 2px;
     }
-    
-    #red-ui-workspace.nr-grouped-workspace-tabs-enabled #red-ui-workspace-chart {
+
+    #red-ui-workspace.nr-grouped-flows-enabled #red-ui-workspace-chart {
         top: 72px;
     }
-    
-    #red-ui-workspace.nr-grouped-workspace-tabs-enabled #red-ui-workspace-tabs-shade {
+
+    #red-ui-workspace.nr-grouped-flows-enabled #red-ui-workspace-tabs-shade {
         height: 72px;
     }
-    
-    #red-ui-workspace.nr-grouped-workspace-tabs-enabled.nr-grouped-workspace-tabs-single-row #red-ui-workspace-chart {
+
+    #red-ui-workspace.nr-grouped-flows-enabled.nr-grouped-flows-single-row #red-ui-workspace-chart {
         top: 36px;
     }
-    
-    #red-ui-workspace.nr-grouped-workspace-tabs-enabled.nr-grouped-workspace-tabs-single-row #red-ui-workspace-tabs-shade {
+
+    #red-ui-workspace.nr-grouped-flows-enabled.nr-grouped-flows-single-row #red-ui-workspace-tabs-shade {
         height: 36px;
     }
-    
-    #dialog-form .nr-grouped-workspace-tabs-group-row label {
+
+    #dialog-form .nr-grouped-flows-group-row label {
         width: auto;
     }
-    
-    #dialog-form .nr-grouped-workspace-tabs-group-row input[type="text"] {
+
+    #dialog-form .nr-grouped-flows-group-row input[type="text"] {
         width: calc(100% - 110px);
     }
     </style>
