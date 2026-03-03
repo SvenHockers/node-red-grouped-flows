@@ -1,0 +1,1635 @@
+<script type="text/javascript">
+    (function() {
+        "use strict";
+    
+        var PLUGIN_ID = "nr-grouped-flows";
+        var PLUGIN_VERSION = "0.1.20";
+        var ORIGINAL_UL_ID = "red-ui-workspace-tabs";
+        var CONTAINER_ID = "nr-grouped-flows";
+        var GROUPS_UL_ID = "nr-grouped-flows-groups";
+        var FLOWS_UL_ID = "nr-grouped-flows-flows";
+        var WORKSPACE_ROOT_ID = "red-ui-workspace";
+        var WORKSPACE_ENABLED_CLASS = "nr-grouped-flows-enabled";
+        var WORKSPACE_GROUP_PROPERTY = "group";
+        var WORKSPACE_SINGLE_ROW_CLASS = "nr-grouped-flows-single-row";
+        var DIALOG_GROUP_ROW_CLASS = "nr-grouped-flows-group-row";
+        var DIALOG_GROUP_INPUT_ID = "nr-grouped-flows-group-input";
+        var DIALOG_GROUP_SAVE_NS = ".nrGroupedFlowsGroupSave";
+        var GROUP_PERSISTENCE_KEY = "nr-grouped-flows.groups.v1";
+        var BOOT_RETRY_INTERVAL_MS = 250;
+        var BOOT_MAX_RETRIES = 120;
+        var WARN_CORE_TABS_RETRY_AT = 40;
+        var FLOW_DOUBLE_CLICK_WINDOW_MS = 450;
+        var EDIT_DIALOG_DEFER_MS = 40;
+        var GROUP_REORDER_SETTLE_MS = 500;
+        var DEBUG_STORAGE_KEY = "nr-grouped-flows-debug";
+        var pluginRegistered = false;
+    
+        function isDebugEnabled() {
+            try {
+                return window.localStorage && localStorage.getItem(DEBUG_STORAGE_KEY) === "1";
+            } catch (err) {
+                return false;
+            }
+        }
+    
+        function setDebugEnabled(enabled) {
+            try {
+                if (!window.localStorage) {
+                    return;
+                }
+                if (enabled) {
+                    localStorage.setItem(DEBUG_STORAGE_KEY, "1");
+                } else {
+                    localStorage.removeItem(DEBUG_STORAGE_KEY);
+                }
+            } catch (err) {
+                // Ignore storage access failures.
+            }
+        }
+    
+        function t(key, fallback, options) {
+            try {
+                if (window.RED && typeof RED._ === "function") {
+                    return RED._(key, options || {});
+                }
+            } catch (err) {
+                // Ignore missing i18n keys and fall back to plain text.
+            }
+            return fallback;
+        }
+    
+        function createController() {
+            var debugEnabled = isDebugEnabled();
+            var state = {
+                originalWrapper: null,
+                container: null,
+                groupTabs: null,
+                flowTabs: null,
+                model: {
+                    groups: [],
+                    groupByName: {},
+                    workspaceToGroup: {},
+                    activeWorkspaceId: null
+                },
+                activeGroup: null,
+                suspendGroupChange: false,
+                suspendFlowChange: false,
+                retryTimer: null,
+                rebuildTimer: null,
+                eventBindings: [],
+                retryCount: 0,
+                didWarnUnavailable: false,
+                lastKnownActiveWorkspaceId: null,
+                lastWorkspaceByGroup: {},
+                groupTabGroupMap: {},
+                flowTabWorkspaceMap: {},
+                lastFlowPointerWorkspaceId: null,
+                lastFlowPointerTime: 0,
+                pendingFlowDoubleWorkspaceId: null,
+                pendingEditOpenTimer: null,
+                applyingFlowReorder: false,
+                applyingGroupReorder: false,
+                skipNextFlowsReorderRebuild: false,
+                lastRenderedGroupSignature: "",
+                lastRenderedActiveGroup: null,
+                lastRenderedFlowGroup: null,
+                lastRenderedFlowSignature: "",
+                lastRenderedActiveFlowTab: null,
+                wrappedEditFlow: null,
+                originalEditFlow: null,
+                persistedGroups: null
+            };
+    
+            function debug(message, data) {
+                if (!debugEnabled || !window.console || typeof console.log !== "function") {
+                    return;
+                }
+                if (typeof data !== "undefined") {
+                    console.log("[nr-grouped-workspace-tabs][debug] " + message, data);
+                } else {
+                    console.log("[nr-grouped-workspace-tabs][debug] " + message);
+                }
+            }
+    
+            function warn(message) {
+                if (window.console && typeof console.warn === "function") {
+                    console.warn("[nr-grouped-workspace-tabs] " + message);
+                }
+                if (RED.notify && typeof RED.notify === "function") {
+                    RED.notify(message, "warning", false, 3000);
+                }
+            }
+    
+            function addFlowEnabled() {
+                if (RED.settings && typeof RED.settings.theme === "function") {
+                    return RED.settings.theme("menu.menu-item-workspace-add", true);
+                }
+                return true;
+            }
+    
+            function buildFlowMenu() {
+                return [
+                    {
+                        id: "nr-grouped-tabs-list-flows",
+                        label: t("workspace.listFlows", "List flows"),
+                        onselect: "core:list-flows"
+                    },
+                    {
+                        id: "nr-grouped-tabs-list-subflows",
+                        label: t("workspace.listSubflows", "List subflows"),
+                        onselect: "core:list-subflows"
+                    },
+                    null,
+                    {
+                        id: "nr-grouped-tabs-add-flow",
+                        label: t("workspace.addFlow", "Add flow"),
+                        onselect: "core:add-flow"
+                    }
+                ];
+            }
+    
+            function normalizeGroupName(value) {
+                return String(value || "").trim();
+            }
+    
+            function getWorkspaceById(workspaceId) {
+                if (!workspaceId || !RED.nodes || typeof RED.nodes.workspace !== "function") {
+                    return null;
+                }
+                return RED.nodes.workspace(workspaceId);
+            }
+    
+            function loadPersistedGroups() {
+                try {
+                    if (!window.localStorage) {
+                        return {};
+                    }
+                    var raw = localStorage.getItem(GROUP_PERSISTENCE_KEY);
+                    if (!raw) {
+                        return {};
+                    }
+                    var parsed = JSON.parse(raw);
+                    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+                        return {};
+                    }
+                    var groups = {};
+                    Object.keys(parsed).forEach(function(workspaceId) {
+                        var groupName = normalizeGroupName(parsed[workspaceId]);
+                        if (workspaceId && groupName) {
+                            groups[workspaceId] = groupName;
+                        }
+                    });
+                    return groups;
+                } catch (err) {
+                    return {};
+                }
+            }
+    
+            function ensurePersistedGroupsLoaded() {
+                if (!state.persistedGroups) {
+                    state.persistedGroups = loadPersistedGroups();
+                }
+            }
+    
+            function savePersistedGroups() {
+                try {
+                    if (!window.localStorage) {
+                        return;
+                    }
+                    localStorage.setItem(GROUP_PERSISTENCE_KEY, JSON.stringify(state.persistedGroups || {}));
+                } catch (err) {
+                    // Ignore storage write failures.
+                }
+            }
+    
+            function getPersistedGroup(workspaceId) {
+                ensurePersistedGroupsLoaded();
+                if (!workspaceId || !state.persistedGroups) {
+                    return "";
+                }
+                return normalizeGroupName(state.persistedGroups[workspaceId]);
+            }
+    
+            function setPersistedGroup(workspaceId, groupName) {
+                if (!workspaceId) {
+                    return;
+                }
+                ensurePersistedGroupsLoaded();
+                var normalized = normalizeGroupName(groupName);
+                var oldValue = normalizeGroupName(state.persistedGroups[workspaceId]);
+                if (normalized) {
+                    if (oldValue === normalized) {
+                        return;
+                    }
+                    state.persistedGroups[workspaceId] = normalized;
+                } else if (!oldValue) {
+                    return;
+                } else {
+                    delete state.persistedGroups[workspaceId];
+                }
+                savePersistedGroups();
+            }
+    
+            function prunePersistedGroups(validWorkspaceIds) {
+                ensurePersistedGroupsLoaded();
+                if (!state.persistedGroups) {
+                    return false;
+                }
+                var changed = false;
+                Object.keys(state.persistedGroups).forEach(function(workspaceId) {
+                    if (!validWorkspaceIds[workspaceId]) {
+                        delete state.persistedGroups[workspaceId];
+                        changed = true;
+                    }
+                });
+                return changed;
+            }
+    
+            function makeStableGroupTabId(groupName) {
+                return "nr-group-tab-" + encodeURIComponent(String(groupName || ""));
+            }
+    
+            function makeStableTopFlowTabId(workspaceId) {
+                return "nr-top-flow-tab-" + String(workspaceId || "");
+            }
+    
+            function makeStableFlowTabId(workspaceId) {
+                return "nr-flow-tab-" + String(workspaceId || "");
+            }
+    
+            function getActiveWorkspaceIdFromCore() {
+                if (RED.workspaces && typeof RED.workspaces.active === "function") {
+                    var active = RED.workspaces.active();
+                    if (typeof active === "string" && active) {
+                        return active;
+                    }
+                    if (active && typeof active.id === "string" && active.id) {
+                        return active.id;
+                    }
+                }
+    
+                var activeLink = $("#" + ORIGINAL_UL_ID + " li.red-ui-tab.active > a.red-ui-tab-label").first();
+                if (!activeLink.length) {
+                    return state.lastKnownActiveWorkspaceId;
+                }
+                var href = activeLink.attr("href") || "";
+                if (!href || href.charAt(0) !== "#") {
+                    return state.lastKnownActiveWorkspaceId;
+                }
+                return href.slice(1);
+            }
+    
+            function readCoreTabs() {
+                var items = [];
+                var originalUl = $("#" + ORIGINAL_UL_ID);
+    
+                if (!originalUl.length) {
+                    return items;
+                }
+    
+                originalUl.children("li.red-ui-tab").each(function(index, el) {
+                    var li = $(el);
+                    if (li.hasClass("hide-tab") || li.hasClass("hide")) {
+                        return;
+                    }
+    
+                    var link = li.children("a.red-ui-tab-label[href^='#']").first();
+                    if (!link.length) {
+                        return;
+                    }
+    
+                    var href = link.attr("href") || "";
+                    if (href.charAt(0) !== "#") {
+                        return;
+                    }
+    
+                    var workspaceId = href.slice(1);
+                    var fullLabel = link.find("span.red-ui-text-bidi-aware").first().text().trim();
+                    if (!fullLabel) {
+                        fullLabel = link.text().trim() || workspaceId;
+                    }
+    
+                    var workspace = getWorkspaceById(workspaceId);
+    
+                    items.push({
+                        workspaceId: workspaceId,
+                        fullLabel: fullLabel,
+                        group: normalizeGroupName(workspace ? workspace[WORKSPACE_GROUP_PROPERTY] : ""),
+                        disabled: li.hasClass("red-ui-workspace-disabled"),
+                        locked: li.hasClass("red-ui-workspace-locked"),
+                        changed: li.hasClass("red-ui-workspace-changed"),
+                        active: li.hasClass("active")
+                    });
+                });
+    
+                return items;
+            }
+    
+            function buildModel() {
+                ensurePersistedGroupsLoaded();
+                var groups = [];
+                var groupByName = {};
+                var workspaceToGroup = {};
+                var activeWorkspaceId = null;
+                var coreTabs = readCoreTabs();
+                var explicitActiveWorkspaceId = getActiveWorkspaceIdFromCore();
+                var validWorkspaceIds = {};
+                var persistedChanged = false;
+    
+                coreTabs.forEach(function(item) {
+                    validWorkspaceIds[item.workspaceId] = true;
+                    if (item.group && state.persistedGroups[item.workspaceId] !== item.group) {
+                        state.persistedGroups[item.workspaceId] = item.group;
+                        persistedChanged = true;
+                    }
+                    var flow = {
+                        workspaceId: item.workspaceId,
+                        flowTabId: makeStableFlowTabId(item.workspaceId),
+                        label: item.fullLabel,
+                        fullLabel: item.fullLabel,
+                        disabled: item.disabled,
+                        locked: item.locked,
+                        changed: item.changed
+                    };
+                    var groupName = normalizeGroupName(item.group || getPersistedGroup(item.workspaceId));
+                    var group;
+    
+                    if (groupName) {
+                        var groupKey = "group:" + groupName;
+                        group = groupByName[groupKey];
+                        if (!group) {
+                            group = {
+                                key: groupKey,
+                                name: groupName,
+                                tabId: makeStableGroupTabId(groupName),
+                                flows: [],
+                                standalone: false
+                            };
+                            groupByName[group.key] = group;
+                            groups.push(group);
+                        }
+                        group.flows.push(flow);
+                        workspaceToGroup[flow.workspaceId] = group.key;
+                    } else {
+                        group = {
+                            key: "flow:" + flow.workspaceId,
+                            name: flow.label,
+                            tabId: makeStableTopFlowTabId(flow.workspaceId),
+                            flows: [flow],
+                            standalone: true,
+                            standaloneWorkspaceId: flow.workspaceId
+                        };
+                        groupByName[group.key] = group;
+                        groups.push(group);
+                        workspaceToGroup[flow.workspaceId] = group.key;
+                    }
+    
+                    if (item.active || flow.workspaceId === explicitActiveWorkspaceId) {
+                        activeWorkspaceId = item.workspaceId;
+                    }
+                });
+    
+                if (coreTabs.length) {
+                    if (prunePersistedGroups(validWorkspaceIds)) {
+                        persistedChanged = true;
+                    }
+                    if (persistedChanged) {
+                        savePersistedGroups();
+                    }
+                }
+    
+                return {
+                    groups: groups,
+                    groupByName: groupByName,
+                    workspaceToGroup: workspaceToGroup,
+                    activeWorkspaceId: activeWorkspaceId || explicitActiveWorkspaceId || state.lastKnownActiveWorkspaceId
+                };
+            }
+    
+            function clearTabs(tabApi) {
+                if (!tabApi || typeof tabApi.listTabs !== "function") {
+                    return;
+                }
+    
+                var existing = tabApi.listTabs() || [];
+                existing.slice().forEach(function(id) {
+                    tabApi.removeTab(id);
+                });
+            }
+    
+            function arraysEqual(a, b) {
+                if (!a || !b || a.length !== b.length) {
+                    return false;
+                }
+                for (var i = 0; i < a.length; i += 1) {
+                    if (a[i] !== b[i]) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+    
+            function getGroupSignature(groups) {
+                if (!Array.isArray(groups) || !groups.length) {
+                    return "";
+                }
+                return groups.map(function(group) {
+                    return [
+                        group.key || "",
+                        group.name || "",
+                        group.standalone ? "1" : "0"
+                    ].join("\u001e");
+                }).join("\u001f");
+            }
+    
+            function getFlowSignature(flows) {
+                if (!Array.isArray(flows) || !flows.length) {
+                    return "";
+                }
+                return flows.map(function(flow) {
+                    return [
+                        flow.workspaceId,
+                        flow.label || "",
+                        flow.fullLabel || "",
+                        flow.disabled ? "1" : "0",
+                        flow.locked ? "1" : "0",
+                        flow.changed ? "1" : "0"
+                    ].join("\u001e");
+                }).join("\u001f");
+            }
+    
+            function rememberWorkspaceForGroup(workspaceId) {
+                if (!workspaceId) {
+                    return;
+                }
+                var groupKey = state.model.workspaceToGroup[workspaceId];
+                if (!groupKey) {
+                    return;
+                }
+                state.lastWorkspaceByGroup[groupKey] = workspaceId;
+            }
+    
+            function pruneGroupWorkspaceMemory() {
+                Object.keys(state.lastWorkspaceByGroup).forEach(function(groupKey) {
+                    var rememberedWorkspaceId = state.lastWorkspaceByGroup[groupKey];
+                    var group = state.model.groupByName[groupKey];
+                    if (!group || !rememberedWorkspaceId) {
+                        delete state.lastWorkspaceByGroup[groupKey];
+                        return;
+                    }
+                    var existsInGroup = group.flows.some(function(flow) {
+                        return flow.workspaceId === rememberedWorkspaceId;
+                    });
+                    if (!existsInGroup) {
+                        delete state.lastWorkspaceByGroup[groupKey];
+                    }
+                });
+            }
+    
+            function applyFlowReorder(newOrder) {
+                if (state.applyingFlowReorder) {
+                    return;
+                }
+                if (!Array.isArray(newOrder) || !newOrder.length) {
+                    return;
+                }
+    
+                var activeGroupKey = state.activeGroup;
+                var activeGroup = activeGroupKey ? state.model.groupByName[activeGroupKey] : null;
+                if (!activeGroup || !activeGroup.flows || activeGroup.flows.length < 2) {
+                    return;
+                }
+    
+                var oldGroupWorkspaceOrder = activeGroup.flows.map(function(flow) {
+                    return flow.workspaceId;
+                });
+                var newGroupWorkspaceOrder = newOrder.map(function(tabId) {
+                        return state.flowTabWorkspaceMap[tabId];
+                    }).filter(function(workspaceId) {
+                        return !!workspaceId;
+                    });
+    
+                if (newGroupWorkspaceOrder.length !== oldGroupWorkspaceOrder.length) {
+                    debug("flow reorder ignored: mapping mismatch", {
+                        group: activeGroupKey,
+                        oldOrder: oldGroupWorkspaceOrder,
+                        newOrder: newOrder,
+                        mapped: newGroupWorkspaceOrder
+                    });
+                    return;
+                }
+    
+                if (arraysEqual(oldGroupWorkspaceOrder, newGroupWorkspaceOrder)) {
+                    debug("flow reorder ignored: no effective change", {
+                        group: activeGroupKey,
+                        order: newGroupWorkspaceOrder
+                    });
+                    return;
+                }
+    
+                var coreWorkspaceOrder = readCoreTabs().map(function(item) {
+                    return item.workspaceId;
+                });
+                if (!coreWorkspaceOrder.length) {
+                    debug("flow reorder ignored: no core workspace order available");
+                    return;
+                }
+    
+                var inGroup = {};
+                oldGroupWorkspaceOrder.forEach(function(workspaceId) {
+                    inGroup[workspaceId] = true;
+                });
+    
+                var queue = newGroupWorkspaceOrder.slice();
+                var updatedWorkspaceOrder = coreWorkspaceOrder.map(function(workspaceId) {
+                    if (inGroup[workspaceId]) {
+                        return queue.shift();
+                    }
+                    return workspaceId;
+                });
+    
+                if (arraysEqual(coreWorkspaceOrder, updatedWorkspaceOrder)) {
+                    debug("flow reorder ignored: computed global order unchanged", {
+                        order: updatedWorkspaceOrder
+                    });
+                    return;
+                }
+    
+                if (!RED.workspaces || typeof RED.workspaces.order !== "function") {
+                    warn("Grouped tabs cannot reorder flows because RED.workspaces.order is unavailable.");
+                    return;
+                }
+    
+                state.applyingFlowReorder = true;
+                debug("applying flow reorder via RED.workspaces.order", {
+                    group: activeGroupKey,
+                    oldGroupOrder: oldGroupWorkspaceOrder,
+                    newGroupOrder: newGroupWorkspaceOrder,
+                    globalOrder: updatedWorkspaceOrder
+                });
+    
+                try {
+                    RED.workspaces.order(updatedWorkspaceOrder);
+                } finally {
+                    setTimeout(function() {
+                        state.applyingFlowReorder = false;
+                        scheduleRebuild();
+                    }, 0);
+                }
+            }
+    
+            function applyGroupReorder(newOrder) {
+                if (state.applyingGroupReorder) {
+                    return;
+                }
+                if (!Array.isArray(newOrder) || !newOrder.length) {
+                    return;
+                }
+    
+                if (!state.model.groups || state.model.groups.length < 2) {
+                    return;
+                }
+    
+                var oldGroupOrder = state.model.groups.map(function(group) {
+                    return group.key;
+                });
+                var newGroupOrder = newOrder.map(function(tabId) {
+                    return state.groupTabGroupMap[tabId];
+                }).filter(function(groupKey) {
+                    return !!groupKey;
+                });
+    
+                if (newGroupOrder.length !== oldGroupOrder.length) {
+                    debug("group reorder ignored: mapping mismatch", {
+                        oldOrder: oldGroupOrder,
+                        newOrder: newOrder,
+                        mapped: newGroupOrder
+                    });
+                    return;
+                }
+    
+                if (arraysEqual(oldGroupOrder, newGroupOrder)) {
+                    debug("group reorder ignored: no effective change", {
+                        order: newGroupOrder
+                    });
+                    return;
+                }
+    
+                var groupFlowsByName = {};
+                state.model.groups.forEach(function(group) {
+                    groupFlowsByName[group.key] = group.flows.map(function(flow) {
+                        return flow.workspaceId;
+                    });
+                });
+    
+                var reorderedWorkspaceOrder = [];
+                newGroupOrder.forEach(function(groupKey) {
+                    reorderedWorkspaceOrder = reorderedWorkspaceOrder.concat(groupFlowsByName[groupKey] || []);
+                });
+    
+                var coreWorkspaceOrder = readCoreTabs().map(function(item) {
+                    return item.workspaceId;
+                });
+    
+                if (!coreWorkspaceOrder.length) {
+                    debug("group reorder ignored: no core workspace order available");
+                    return;
+                }
+    
+                if (reorderedWorkspaceOrder.length !== coreWorkspaceOrder.length) {
+                    debug("group reorder ignored: computed workspace size mismatch", {
+                        coreOrder: coreWorkspaceOrder,
+                        reordered: reorderedWorkspaceOrder
+                    });
+                    return;
+                }
+    
+                if (arraysEqual(coreWorkspaceOrder, reorderedWorkspaceOrder)) {
+                    debug("group reorder ignored: global order unchanged", {
+                        order: reorderedWorkspaceOrder
+                    });
+                    return;
+                }
+    
+                if (!RED.workspaces || typeof RED.workspaces.order !== "function") {
+                    warn("Grouped tabs cannot reorder groups because RED.workspaces.order is unavailable.");
+                    return;
+                }
+    
+                var groupsByName = {};
+                state.model.groups.forEach(function(group) {
+                    groupsByName[group.key] = group;
+                });
+                state.model.groups = newGroupOrder.map(function(groupKey) {
+                    return groupsByName[groupKey];
+                }).filter(function(group) {
+                    return !!group;
+                });
+                state.lastRenderedGroupSignature = getGroupSignature(state.model.groups);
+    
+                state.applyingGroupReorder = true;
+                state.skipNextFlowsReorderRebuild = true;
+                debug("applying group reorder via RED.workspaces.order", {
+                    oldGroupOrder: oldGroupOrder,
+                    newGroupOrder: newGroupOrder,
+                    globalOrder: reorderedWorkspaceOrder
+                });
+    
+                try {
+                    RED.workspaces.order(reorderedWorkspaceOrder);
+                } finally {
+                    setTimeout(function() {
+                        state.applyingGroupReorder = false;
+                        state.skipNextFlowsReorderRebuild = false;
+                    }, GROUP_REORDER_SETTLE_MS);
+                }
+            }
+    
+            function activateCoreWorkspace(workspaceId) {
+                if (!workspaceId) {
+                    return;
+                }
+    
+                if (workspaceId === getActiveWorkspaceIdFromCore()) {
+                    debug("activateCoreWorkspace skipped: already active", { workspaceId: workspaceId });
+                    return;
+                }
+    
+                state.lastKnownActiveWorkspaceId = workspaceId;
+                debug("activateCoreWorkspace", { workspaceId: workspaceId });
+    
+                if (RED.workspaces && typeof RED.workspaces.show === "function") {
+                    debug("activateCoreWorkspace using RED.workspaces.show", { workspaceId: workspaceId });
+                    RED.workspaces.show(workspaceId);
+                    return;
+                }
+    
+                var coreLink = $("#" + ORIGINAL_UL_ID + " a.red-ui-tab-label").filter(function() {
+                    return ($(this).attr("href") || "") === ("#" + workspaceId);
+                }).first();
+    
+                if (!coreLink.length) {
+                    if (RED.workspaces && typeof RED.workspaces.show === "function") {
+                        debug("activateCoreWorkspace fallback RED.workspaces.show", { workspaceId: workspaceId });
+                        RED.workspaces.show(workspaceId);
+                    }
+                    debug("activateCoreWorkspace failed: core link not found", { workspaceId: workspaceId });
+                    return;
+                }
+    
+                debug("activateCoreWorkspace fallback synthetic click", { workspaceId: workspaceId });
+                coreLink.trigger($.Event("mousedown", { which: 1 }));
+                coreLink.trigger($.Event("mouseup", { which: 1 }));
+            }
+    
+            function performOpenWorkspaceEditDialog(workspaceId) {
+                if (!workspaceId) {
+                    return;
+                }
+    
+                var handled = false;
+                var workspace = null;
+                var subflow = null;
+    
+                if (RED.workspaces && typeof RED.workspaces.edit === "function") {
+                    try {
+                        debug("openWorkspaceEditDialog via RED.workspaces.edit", { workspaceId: workspaceId });
+                        RED.workspaces.edit(workspaceId);
+                        return;
+                    } catch (err) {
+                        debug("openWorkspaceEditDialog RED.workspaces.edit failed", {
+                            workspaceId: workspaceId,
+                            error: err && err.message ? err.message : err
+                        });
+                    }
+                }
+    
+                workspace = getWorkspaceById(workspaceId);
+    
+                if (!workspace) {
+                    if (RED.nodes && typeof RED.nodes.subflow === "function") {
+                        subflow = RED.nodes.subflow(workspaceId);
+                    }
+                    if (subflow && RED.editor && typeof RED.editor.editSubflow === "function") {
+                        debug("openWorkspaceEditDialog via RED.editor.editSubflow", { workspaceId: workspaceId });
+                        RED.editor.editSubflow(subflow);
+                        handled = true;
+                    }
+                } else if (!workspace.locked && RED.editor && typeof RED.editor.editFlow === "function") {
+                    debug("openWorkspaceEditDialog via RED.editor.editFlow", { workspaceId: workspaceId });
+                    RED.editor.editFlow(workspace);
+                    handled = true;
+                }
+    
+                if (handled) {
+                    return;
+                }
+    
+                var coreLink = $("#" + ORIGINAL_UL_ID + " a.red-ui-tab-label").filter(function() {
+                    return ($(this).attr("href") || "") === ("#" + workspaceId);
+                }).first();
+    
+                if (coreLink.length) {
+                    debug("openWorkspaceEditDialog via core link dblclick fallback", { workspaceId: workspaceId });
+                    coreLink.trigger($.Event("dblclick", { which: 1 }));
+                    return;
+                }
+    
+                debug("openWorkspaceEditDialog failed: no edit path available", {
+                    workspaceId: workspaceId,
+                    hasWorkspace: !!workspace,
+                    hasSubflow: !!subflow,
+                    hasWorkspacesEdit: !!(RED.workspaces && typeof RED.workspaces.edit === "function"),
+                    hasEditorEditFlow: !!(RED.editor && typeof RED.editor.editFlow === "function"),
+                    hasEditorEditSubflow: !!(RED.editor && typeof RED.editor.editSubflow === "function")
+                });
+            }
+    
+            function openWorkspaceEditDialog(workspaceId) {
+                if (!workspaceId) {
+                    return;
+                }
+    
+                if (state.pendingEditOpenTimer) {
+                    clearTimeout(state.pendingEditOpenTimer);
+                    state.pendingEditOpenTimer = null;
+                }
+    
+                // Defer edit opening slightly so tab activation/click handlers finish first.
+                state.pendingEditOpenTimer = setTimeout(function() {
+                    state.pendingEditOpenTimer = null;
+                    performOpenWorkspaceEditDialog(workspaceId);
+                }, EDIT_DIALOG_DEFER_MS);
+            }
+    
+            function markFlowTabWorkspaces() {
+                var flowsUl = $("#" + FLOWS_UL_ID);
+                if (!flowsUl.length) {
+                    return;
+                }
+    
+                flowsUl.children("li.red-ui-tab").each(function(index, el) {
+                    var li = $(el);
+                    var href = $(this).children("a.red-ui-tab-label").attr("href") || "";
+                    if (href.charAt(0) !== "#") {
+                        li.removeAttr("data-workspace-id");
+                        return;
+                    }
+                    var tabId = href.slice(1);
+                    var workspaceId = state.flowTabWorkspaceMap[tabId];
+                    if (workspaceId) {
+                        li.attr("data-workspace-id", workspaceId);
+                    } else {
+                        li.removeAttr("data-workspace-id");
+                    }
+                });
+            }
+    
+            function resetFlowTabsState() {
+                state.suspendFlowChange = true;
+                clearTabs(state.flowTabs);
+                state.suspendFlowChange = false;
+                state.flowTabWorkspaceMap = {};
+                state.lastRenderedFlowGroup = null;
+                state.lastRenderedFlowSignature = "";
+                state.lastRenderedActiveFlowTab = null;
+            }
+    
+            function setFlowRowVisible(visible) {
+                var flowWrapper = $("#" + FLOWS_UL_ID).closest(".red-ui-tabs");
+                if (flowWrapper.length) {
+                    if (visible) {
+                        flowWrapper.show();
+                    } else {
+                        flowWrapper.hide();
+                    }
+                }
+                $("#" + WORKSPACE_ROOT_ID).toggleClass(WORKSPACE_SINGLE_ROW_CLASS, !visible);
+            }
+    
+            function findVisibleDialogForm() {
+                var form = $("#dialog-form");
+                if (form.length && form.is(":visible")) {
+                    return form.first();
+                }
+                form = $(".ui-dialog-content:visible form").first();
+                if (form.length) {
+                    return form;
+                }
+                return $();
+            }
+    
+            function persistDialogGroupValue(workspaceId) {
+                var workspace = getWorkspaceById(workspaceId);
+                var input = $("#" + DIALOG_GROUP_INPUT_ID);
+                if (!workspace || !input.length) {
+                    return;
+                }
+    
+                var oldValue = normalizeGroupName(workspace[WORKSPACE_GROUP_PROPERTY]);
+                var newValue = normalizeGroupName(input.val());
+                if (newValue === oldValue) {
+                    return;
+                }
+    
+                if (newValue) {
+                    workspace[WORKSPACE_GROUP_PROPERTY] = newValue;
+                } else {
+                    delete workspace[WORKSPACE_GROUP_PROPERTY];
+                }
+                setPersistedGroup(workspaceId, newValue);
+                if (RED.nodes && typeof RED.nodes.dirty === "function") {
+                    RED.nodes.dirty(true);
+                }
+                scheduleRebuild();
+                debug("workspace group updated", {
+                    workspaceId: workspaceId,
+                    oldGroup: oldValue,
+                    newGroup: newValue
+                });
+            }
+    
+            function bindDialogGroupSave(workspaceId, form) {
+                if (!workspaceId || !form || !form.length) {
+                    return;
+                }
+    
+                var saveButtons = $("#node-dialog-ok, #node-dialog-ok-save, .red-ui-tray-footer button.red-ui-button.primary");
+                saveButtons.off(DIALOG_GROUP_SAVE_NS).on("click" + DIALOG_GROUP_SAVE_NS, function() {
+                    setTimeout(function() {
+                        persistDialogGroupValue(workspaceId);
+                    }, 0);
+                });
+                form.off("submit" + DIALOG_GROUP_SAVE_NS).on("submit" + DIALOG_GROUP_SAVE_NS, function() {
+                    setTimeout(function() {
+                        persistDialogGroupValue(workspaceId);
+                    }, 0);
+                });
+            }
+    
+            function ensureDialogGroupField(workspaceId) {
+                var workspace = getWorkspaceById(workspaceId);
+                if (!workspace) {
+                    return false;
+                }
+    
+                var form = findVisibleDialogForm();
+                if (!form.length) {
+                    return false;
+                }
+    
+                var row = form.find("." + DIALOG_GROUP_ROW_CLASS).first();
+                if (!row.length) {
+                    row = $('<div class="form-row ' + DIALOG_GROUP_ROW_CLASS + '"></div>');
+                    row.append('<label for="' + DIALOG_GROUP_INPUT_ID + '"><i class="fa fa-folder-open"></i> ' + t("Group", "Group") + "</label>");
+                    row.append('<input type="text" id="' + DIALOG_GROUP_INPUT_ID + '" placeholder="' + t("Optional group", "Optional group") + '">');
+    
+                    var infoRow = form.find("#node-input-info").closest(".form-row");
+                    if (infoRow.length) {
+                        infoRow.before(row);
+                    } else {
+                        var labelRow = form.find("#node-input-label").closest(".form-row");
+                        if (labelRow.length) {
+                            labelRow.after(row);
+                        } else {
+                            form.append(row);
+                        }
+                    }
+                }
+    
+                row.find("#" + DIALOG_GROUP_INPUT_ID).val(normalizeGroupName(workspace[WORKSPACE_GROUP_PROPERTY]));
+                bindDialogGroupSave(workspaceId, form);
+                return true;
+            }
+    
+            function scheduleEnsureDialogGroupField(workspaceId) {
+                if (!workspaceId) {
+                    return;
+                }
+    
+                var attempts = 0;
+                function attempt() {
+                    if (ensureDialogGroupField(workspaceId)) {
+                        return;
+                    }
+                    attempts += 1;
+                    if (attempts < 20) {
+                        setTimeout(attempt, 25);
+                    }
+                }
+                setTimeout(attempt, 0);
+            }
+    
+            function patchEditFlowDialog() {
+                if (state.wrappedEditFlow || !RED.editor || typeof RED.editor.editFlow !== "function") {
+                    return;
+                }
+    
+                state.originalEditFlow = RED.editor.editFlow;
+                state.wrappedEditFlow = function(workspace) {
+                    var result = state.originalEditFlow.apply(this, arguments);
+                    var workspaceId = workspace && typeof workspace === "object" ? workspace.id : workspace;
+                    if (workspaceId) {
+                        scheduleEnsureDialogGroupField(workspaceId);
+                    }
+                    return result;
+                };
+                RED.editor.editFlow = state.wrappedEditFlow;
+            }
+    
+            function unpatchEditFlowDialog() {
+                if (!state.wrappedEditFlow || !state.originalEditFlow || !RED.editor) {
+                    return;
+                }
+                if (RED.editor.editFlow === state.wrappedEditFlow) {
+                    RED.editor.editFlow = state.originalEditFlow;
+                }
+                state.wrappedEditFlow = null;
+                state.originalEditFlow = null;
+                $("#node-dialog-ok, #node-dialog-ok-save, .red-ui-tray-footer button.red-ui-button.primary").off(DIALOG_GROUP_SAVE_NS);
+                $("#dialog-form").off(DIALOG_GROUP_SAVE_NS);
+            }
+    
+            function bindTabDomEvents() {
+                var groupsUl = $("#" + GROUPS_UL_ID);
+                var flowsUl = $("#" + FLOWS_UL_ID);
+    
+                groupsUl.off(".nrGroupedTabs");
+                flowsUl.off(".nrGroupedTabs");
+    
+                groupsUl.on("mousedown.nrGroupedTabs", "li.red-ui-tab", function() {
+                    state.lastFlowPointerWorkspaceId = null;
+                    state.lastFlowPointerTime = 0;
+                    state.pendingFlowDoubleWorkspaceId = null;
+                    debug("group mousedown cleared pending double-click state");
+                });
+    
+                flowsUl.on("mousedown.nrGroupedTabs", "li.red-ui-tab", function() {
+                    var li = $(this);
+                    var tabId = li.data("tabId");
+                    if (!tabId) {
+                        var href = li.children("a.red-ui-tab-label").attr("href") || "";
+                        if (href.charAt(0) === "#") {
+                            tabId = href.slice(1);
+                        }
+                    }
+    
+                    var workspaceId = li.attr("data-workspace-id") || state.flowTabWorkspaceMap[tabId];
+                    if (!workspaceId) {
+                        debug("flow mousedown without workspace mapping", { tabId: tabId });
+                        return;
+                    }
+    
+                    var now = Date.now();
+                    if (
+                        state.lastFlowPointerWorkspaceId === workspaceId &&
+                        (now - state.lastFlowPointerTime) < FLOW_DOUBLE_CLICK_WINDOW_MS
+                    ) {
+                        state.pendingFlowDoubleWorkspaceId = workspaceId;
+                        debug("flow mousedown potential double-click armed", { workspaceId: workspaceId });
+                    } else {
+                        state.pendingFlowDoubleWorkspaceId = null;
+                        debug("flow mousedown single click", { workspaceId: workspaceId });
+                    }
+    
+                    state.lastFlowPointerWorkspaceId = workspaceId;
+                    state.lastFlowPointerTime = now;
+                });
+            }
+    
+            function unbindTabDomEvents() {
+                $("#" + GROUPS_UL_ID).off(".nrGroupedTabs");
+                $("#" + FLOWS_UL_ID).off(".nrGroupedTabs");
+            }
+    
+            function renderGroupTabs() {
+                if (!state.groupTabs) {
+                    return;
+                }
+    
+                var currentSignature = getGroupSignature(state.model.groups);
+                var groupsChanged = currentSignature !== state.lastRenderedGroupSignature;
+    
+                if (groupsChanged) {
+                    state.suspendGroupChange = true;
+                    clearTabs(state.groupTabs);
+                    state.groupTabGroupMap = {};
+    
+                    state.model.groups.forEach(function(group) {
+                        state.groupTabs.addTab({
+                            id: group.tabId,
+                            label: group.name,
+                            name: group.name,
+                            groupKey: group.key
+                        });
+                        state.groupTabGroupMap[group.tabId] = group.key;
+                    });
+    
+                    state.lastRenderedGroupSignature = currentSignature;
+                    state.lastRenderedActiveGroup = null;
+                    state.suspendGroupChange = false;
+                }
+    
+                if (
+                    state.activeGroup &&
+                    state.model.groupByName[state.activeGroup] &&
+                    state.lastRenderedActiveGroup !== state.activeGroup
+                ) {
+                    state.suspendGroupChange = true;
+                    state.groupTabs.activateTab(state.model.groupByName[state.activeGroup].tabId);
+                    state.suspendGroupChange = false;
+                    state.lastRenderedActiveGroup = state.activeGroup;
+                }
+            }
+    
+            function renderFlowTabs(groupKey, activateFirstIfNeeded) {
+                if (!state.flowTabs) {
+                    return;
+                }
+    
+                var selectedGroup = state.model.groupByName[groupKey];
+                if (!selectedGroup) {
+                    setFlowRowVisible(false);
+                    resetFlowTabsState();
+                    return;
+                }
+    
+                if (selectedGroup.standalone) {
+                    setFlowRowVisible(false);
+                    resetFlowTabsState();
+    
+                    var standaloneFlow = selectedGroup.flows[0];
+                    if (!standaloneFlow) {
+                        return;
+                    }
+    
+                    var activeStandaloneWorkspaceId = state.model.activeWorkspaceId || getActiveWorkspaceIdFromCore();
+                    if (
+                        activateFirstIfNeeded &&
+                        standaloneFlow.workspaceId &&
+                        standaloneFlow.workspaceId !== activeStandaloneWorkspaceId
+                    ) {
+                        setTimeout(function() {
+                            activateCoreWorkspace(standaloneFlow.workspaceId);
+                        }, 0);
+                    }
+                    state.lastWorkspaceByGroup[groupKey] = standaloneFlow.workspaceId;
+                    return;
+                }
+    
+                setFlowRowVisible(true);
+    
+                var currentFlowSignature = getFlowSignature(selectedGroup.flows);
+                var flowsChanged = (
+                    state.lastRenderedFlowGroup !== groupKey ||
+                    state.lastRenderedFlowSignature !== currentFlowSignature
+                );
+    
+                if (flowsChanged) {
+                    state.suspendFlowChange = true;
+                    clearTabs(state.flowTabs);
+                    state.flowTabWorkspaceMap = {};
+    
+                    selectedGroup.flows.forEach(function(flow) {
+                        state.flowTabs.addTab({
+                            id: flow.flowTabId,
+                            label: flow.label,
+                            name: flow.fullLabel,
+                            fullLabel: flow.fullLabel,
+                            workspaceId: flow.workspaceId,
+                            disabled: flow.disabled,
+                            locked: flow.locked,
+                            changed: flow.changed
+                        });
+                        state.flowTabWorkspaceMap[flow.flowTabId] = flow.workspaceId;
+                    });
+                    markFlowTabWorkspaces();
+    
+                    state.lastRenderedFlowGroup = groupKey;
+                    state.lastRenderedFlowSignature = currentFlowSignature;
+                    state.lastRenderedActiveFlowTab = null;
+                    state.suspendFlowChange = false;
+                }
+    
+                var activeWorkspaceId = state.model.activeWorkspaceId || getActiveWorkspaceIdFromCore();
+                var selectedFlow = null;
+                var activeFlowInGroup = null;
+                var rememberedWorkspaceId = state.lastWorkspaceByGroup[groupKey];
+    
+                if (activeWorkspaceId) {
+                    activeFlowInGroup = selectedGroup.flows.find(function(flow) {
+                        return flow.workspaceId === activeWorkspaceId;
+                    }) || null;
+                }
+    
+                if (activeFlowInGroup) {
+                    selectedFlow = activeFlowInGroup;
+                } else if (rememberedWorkspaceId) {
+                    selectedFlow = selectedGroup.flows.find(function(flow) {
+                        return flow.workspaceId === rememberedWorkspaceId;
+                    }) || null;
+                }
+    
+                if (!selectedFlow && selectedGroup.flows.length) {
+                    selectedFlow = selectedGroup.flows[0];
+                }
+    
+                if (
+                    activateFirstIfNeeded &&
+                    selectedFlow &&
+                    selectedFlow.workspaceId !== activeWorkspaceId
+                ) {
+                    setTimeout(function() {
+                        activateCoreWorkspace(selectedFlow.workspaceId);
+                    }, 0);
+                }
+    
+                if (selectedFlow) {
+                    if (state.lastRenderedActiveFlowTab !== selectedFlow.flowTabId) {
+                        state.suspendFlowChange = true;
+                        state.flowTabs.activateTab(selectedFlow.flowTabId);
+                        state.suspendFlowChange = false;
+                        state.lastRenderedActiveFlowTab = selectedFlow.flowTabId;
+                    }
+                    state.lastWorkspaceByGroup[groupKey] = selectedFlow.workspaceId;
+                } else {
+                    state.lastRenderedActiveFlowTab = null;
+                }
+            }
+    
+            function onGroupChange(groupKey) {
+                state.activeGroup = groupKey;
+                state.lastRenderedActiveGroup = groupKey;
+    
+                // Group click shows and activates the group's currently remembered flow (or first flow).
+                renderFlowTabs(groupKey, true);
+            }
+    
+            function rebuild() {
+                if (!mount()) {
+                    waitForCoreTabs();
+                    return;
+                }
+    
+                state.model = buildModel();
+                state.lastKnownActiveWorkspaceId = state.model.activeWorkspaceId || state.lastKnownActiveWorkspaceId;
+                rememberWorkspaceForGroup(state.model.activeWorkspaceId);
+                pruneGroupWorkspaceMemory();
+    
+                if (state.model.activeWorkspaceId) {
+                    var groupFromActive = state.model.workspaceToGroup[state.model.activeWorkspaceId];
+                    if (groupFromActive) {
+                        state.activeGroup = groupFromActive;
+                    }
+                }
+    
+                if (!state.activeGroup || !state.model.groupByName[state.activeGroup]) {
+                    state.activeGroup = state.model.groups.length ? state.model.groups[0].key : null;
+                }
+    
+                renderGroupTabs();
+                renderFlowTabs(state.activeGroup, false);
+            }
+    
+            function scheduleRebuild() {
+                if (state.rebuildTimer) {
+                    clearTimeout(state.rebuildTimer);
+                }
+                state.rebuildTimer = setTimeout(rebuild, 0);
+            }
+    
+            function bindEvents() {
+                if (!RED.events || state.eventBindings.length) {
+                    return;
+                }
+    
+                [
+                    "flows:add",
+                    "flows:remove",
+                    "flows:change",
+                    "flows:reorder",
+                    "workspace:change",
+                    "workspace:show",
+                    "workspace:hide"
+                ].forEach(function(name) {
+                    var handler = function(activeWorkspaceId) {
+                        if (name === "flows:reorder" && state.skipNextFlowsReorderRebuild) {
+                            state.skipNextFlowsReorderRebuild = false;
+                            debug("flows:reorder rebuild skipped (internal group reorder)");
+                            return;
+                        }
+    
+                        if (name === "workspace:change") {
+                            if (typeof activeWorkspaceId === "string" && activeWorkspaceId) {
+                                state.lastKnownActiveWorkspaceId = activeWorkspaceId;
+                                rememberWorkspaceForGroup(activeWorkspaceId);
+                            } else if (
+                                activeWorkspaceId &&
+                                typeof activeWorkspaceId === "object" &&
+                                typeof activeWorkspaceId.id === "string" &&
+                                activeWorkspaceId.id
+                            ) {
+                                state.lastKnownActiveWorkspaceId = activeWorkspaceId.id;
+                                rememberWorkspaceForGroup(activeWorkspaceId.id);
+                            }
+                        }
+                        scheduleRebuild();
+                    };
+                    RED.events.on(name, handler);
+                    state.eventBindings.push({ name: name, handler: handler });
+                });
+            }
+    
+            function unbindEvents() {
+                if (!RED.events || !state.eventBindings.length) {
+                    return;
+                }
+    
+                var off = RED.events.off || RED.events.removeListener;
+                if (typeof off === "function") {
+                    state.eventBindings.forEach(function(binding) {
+                        off.call(RED.events, binding.name, binding.handler);
+                    });
+                }
+    
+                state.eventBindings = [];
+            }
+    
+            function mount() {
+                if (!RED.tabs || typeof RED.tabs.create !== "function") {
+                    return false;
+                }
+    
+                var originalUl = $("#" + ORIGINAL_UL_ID);
+                if (!originalUl.length) {
+                    return false;
+                }
+    
+                var originalWrapper = originalUl.closest(".red-ui-tabs");
+                if (!originalWrapper.length) {
+                    return false;
+                }
+    
+                state.originalWrapper = originalWrapper;
+    
+                if (!state.container || !state.container.length) {
+                    state.container = $('<div id="' + CONTAINER_ID + '" class="nr-grouped-workspace-tabs"></div>');
+                    state.container.append('<ul id="' + GROUPS_UL_ID + '"></ul>');
+                    state.container.append('<ul id="' + FLOWS_UL_ID + '"></ul>');
+    
+                    originalWrapper.after(state.container);
+    
+                    state.groupTabs = RED.tabs.create({
+                        id: GROUPS_UL_ID,
+                        scrollable: true,
+                        sortable: true,
+                        onreorder: function(oldOrder, newOrder) {
+                            debug("group onreorder", {
+                                oldOrder: oldOrder,
+                                newOrder: newOrder
+                            });
+                            applyGroupReorder(newOrder);
+                        },
+                        onchange: function(tab) {
+                            if (state.suspendGroupChange || !tab) {
+                                return;
+                            }
+                            onGroupChange(tab.groupKey);
+                        },
+                        ondblclick: function(tab) {
+                            if (!tab || !tab.groupKey) {
+                                return;
+                            }
+                            var entry = state.model.groupByName[tab.groupKey];
+                            if (!entry || !entry.standalone || !entry.standaloneWorkspaceId) {
+                                return;
+                            }
+                            openWorkspaceEditDialog(entry.standaloneWorkspaceId);
+                        }
+                    });
+    
+                    state.flowTabs = RED.tabs.create({
+                        id: FLOWS_UL_ID,
+                        scrollable: true,
+                        sortable: true,
+                        addButton: addFlowEnabled() ? "core:add-flow" : undefined,
+                        addButtonCaption: t("workspace.addFlow", "Add flow"),
+                        menu: buildFlowMenu,
+                        onreorder: function(oldOrder, newOrder) {
+                            debug("flow onreorder", {
+                                oldOrder: oldOrder,
+                                newOrder: newOrder
+                            });
+                            applyFlowReorder(newOrder);
+                        },
+                        onchange: function(tab) {
+                            if (state.suspendFlowChange || !tab || !tab.workspaceId) {
+                                return;
+                            }
+                            activateCoreWorkspace(tab.workspaceId);
+                        },
+                        ondblclick: function(tab) {
+                            if (!tab || !tab.workspaceId) {
+                                debug("flow ondblclick ignored: missing tab/workspace");
+                                return;
+                            }
+                            debug("flow ondblclick received", {
+                                workspaceId: tab.workspaceId,
+                                pending: state.pendingFlowDoubleWorkspaceId
+                            });
+                            if (state.pendingFlowDoubleWorkspaceId !== tab.workspaceId) {
+                                debug("flow ondblclick blocked by guard", {
+                                    workspaceId: tab.workspaceId,
+                                    pending: state.pendingFlowDoubleWorkspaceId
+                                });
+                                return;
+                            }
+                            state.pendingFlowDoubleWorkspaceId = null;
+                            debug("flow ondblclick accepted", { workspaceId: tab.workspaceId });
+                            openWorkspaceEditDialog(tab.workspaceId);
+                        }
+                    });
+    
+                    bindTabDomEvents();
+                }
+    
+                patchEditFlowDialog();
+                state.originalWrapper.hide();
+                state.container.show();
+                $("#" + WORKSPACE_ROOT_ID).addClass(WORKSPACE_ENABLED_CLASS);
+                return true;
+            }
+    
+            function waitForCoreTabs() {
+                if (state.retryTimer) {
+                    clearTimeout(state.retryTimer);
+                }
+    
+                if (mount()) {
+                    state.retryCount = 0;
+                    bindEvents();
+                    rebuild();
+                    return;
+                }
+    
+                state.retryCount += 1;
+                if (!state.didWarnUnavailable && state.retryCount >= WARN_CORE_TABS_RETRY_AT) {
+                    state.didWarnUnavailable = true;
+                    warn("Grouped tabs plugin loaded, but core workspace tabs were not found.");
+                }
+    
+                state.retryTimer = setTimeout(waitForCoreTabs, BOOT_RETRY_INTERVAL_MS);
+            }
+    
+            function start() {
+                waitForCoreTabs();
+            }
+    
+            function stop() {
+                if (state.retryTimer) {
+                    clearTimeout(state.retryTimer);
+                    state.retryTimer = null;
+                }
+    
+                if (state.rebuildTimer) {
+                    clearTimeout(state.rebuildTimer);
+                    state.rebuildTimer = null;
+                }
+                if (state.pendingEditOpenTimer) {
+                    clearTimeout(state.pendingEditOpenTimer);
+                    state.pendingEditOpenTimer = null;
+                }
+    
+                unbindEvents();
+                unbindTabDomEvents();
+                unpatchEditFlowDialog();
+    
+                if (state.container && state.container.length) {
+                    state.container.remove();
+                    state.container = null;
+                }
+    
+                if (state.originalWrapper && state.originalWrapper.length) {
+                    state.originalWrapper.show();
+                }
+                $("#" + WORKSPACE_ROOT_ID).removeClass(WORKSPACE_ENABLED_CLASS);
+                $("#" + WORKSPACE_ROOT_ID).removeClass(WORKSPACE_SINGLE_ROW_CLASS);
+    
+                state.groupTabs = null;
+                state.flowTabs = null;
+                state.model = {
+                    groups: [],
+                    groupByName: {},
+                    workspaceToGroup: {},
+                    activeWorkspaceId: null
+                };
+                state.activeGroup = null;
+                state.lastWorkspaceByGroup = {};
+                state.groupTabGroupMap = {};
+                state.flowTabWorkspaceMap = {};
+                state.lastFlowPointerWorkspaceId = null;
+                state.lastFlowPointerTime = 0;
+                state.pendingFlowDoubleWorkspaceId = null;
+                state.pendingEditOpenTimer = null;
+                state.applyingFlowReorder = false;
+                state.applyingGroupReorder = false;
+                state.skipNextFlowsReorderRebuild = false;
+                state.lastRenderedGroupSignature = "";
+                state.lastRenderedActiveGroup = null;
+                state.lastRenderedFlowGroup = null;
+                state.lastRenderedFlowSignature = "";
+                state.lastRenderedActiveFlowTab = null;
+                state.wrappedEditFlow = null;
+                state.originalEditFlow = null;
+                state.persistedGroups = null;
+            }
+    
+            return {
+                start: start,
+                stop: stop
+            };
+        }
+    
+        var controller;
+    
+        function startController() {
+            if (controller) {
+                return;
+            }
+            try {
+                controller = createController();
+                controller.start();
+            } catch (err) {
+                controller = null;
+                if (window.console && typeof console.error === "function") {
+                    console.error("[nr-grouped-workspace-tabs] failed to start", err);
+                }
+                if (RED.notify && typeof RED.notify === "function") {
+                    RED.notify("Grouped tabs plugin failed to start. Check browser console.", "error");
+                }
+            }
+        }
+    
+        function stopController() {
+            if (!controller) {
+                return;
+            }
+            controller.stop();
+            controller = null;
+        }
+    
+        function registerPlugin() {
+            if (pluginRegistered) {
+                return;
+            }
+            if (!window.RED || !RED.plugins || typeof RED.plugins.registerPlugin !== "function") {
+                return;
+            }
+    
+            RED.plugins.registerPlugin(PLUGIN_ID, {
+                onadd: function() {
+                    startController();
+                },
+                onremove: function() {
+                    stopController();
+                }
+            });
+            pluginRegistered = true;
+    
+            // Keep a direct startup path for environments where plugin onadd does not fire.
+            if (document.readyState === "loading") {
+                document.addEventListener("DOMContentLoaded", startController);
+            } else {
+                startController();
+            }
+        }
+    
+        function boot() {
+            var tries = 0;
+    
+            function attemptRegister() {
+                registerPlugin();
+                if (pluginRegistered) {
+                    if (window.console && typeof console.info === "function") {
+                        console.info("[nr-grouped-workspace-tabs] registered v" + PLUGIN_VERSION);
+                        if (isDebugEnabled()) {
+                            console.info("[nr-grouped-workspace-tabs] debug mode active");
+                        }
+                    }
+                    return;
+                }
+                tries += 1;
+                if (tries >= BOOT_MAX_RETRIES) {
+                    if (window.console && typeof console.warn === "function") {
+                        console.warn("[nr-grouped-workspace-tabs] failed to register plugin API");
+                    }
+                    return;
+                }
+                setTimeout(attemptRegister, BOOT_RETRY_INTERVAL_MS);
+            }
+    
+            attemptRegister();
+        }
+    
+        if (typeof window !== "undefined") {
+            window.nrGroupedTabsDebug = function(enabled) {
+                setDebugEnabled(!!enabled);
+                if (window.console && typeof console.info === "function") {
+                    console.info("[nr-grouped-workspace-tabs] debug " + (enabled ? "enabled" : "disabled") + "; reload the page");
+                }
+            };
+        }
+    
+        boot();
+    })();
+    </script>
+    
+    <style>
+    #nr-grouped-workspace-tabs {
+        display: none;
+    }
+    
+    #red-ui-workspace.nr-grouped-workspace-tabs-enabled #nr-grouped-workspace-tabs {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        z-index: 3;
+        display: flex;
+        flex-direction: column;
+    }
+    
+    #nr-grouped-workspace-tabs > .red-ui-tabs {
+        margin-bottom: 0;
+    }
+    
+    #nr-grouped-workspace-tabs > .red-ui-tabs + .red-ui-tabs {
+        margin-top: 2px;
+    }
+    
+    #red-ui-workspace.nr-grouped-workspace-tabs-enabled #red-ui-workspace-chart {
+        top: 72px;
+    }
+    
+    #red-ui-workspace.nr-grouped-workspace-tabs-enabled #red-ui-workspace-tabs-shade {
+        height: 72px;
+    }
+    
+    #red-ui-workspace.nr-grouped-workspace-tabs-enabled.nr-grouped-workspace-tabs-single-row #red-ui-workspace-chart {
+        top: 36px;
+    }
+    
+    #red-ui-workspace.nr-grouped-workspace-tabs-enabled.nr-grouped-workspace-tabs-single-row #red-ui-workspace-tabs-shade {
+        height: 36px;
+    }
+    
+    #dialog-form .nr-grouped-workspace-tabs-group-row label {
+        width: auto;
+    }
+    
+    #dialog-form .nr-grouped-workspace-tabs-group-row input[type="text"] {
+        width: calc(100% - 110px);
+    }
+    </style>
+    
