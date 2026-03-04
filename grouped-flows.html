@@ -3,7 +3,7 @@
         "use strict";
     
         var PLUGIN_ID = "nr-grouped-flows";
-        var PLUGIN_VERSION = "0.1.26";
+        var PLUGIN_VERSION = "0.1.30";
         var ORIGINAL_UL_ID = "red-ui-workspace-tabs";
         var CONTAINER_ID = "nr-grouped-flows";
         var GROUPS_UL_ID = "nr-grouped-flows-groups";
@@ -247,7 +247,25 @@
             }
     
             function makeStableGroupTabId(groupName) {
-                return "nr-group-tab-" + encodeURIComponent(String(groupName || ""));
+                var normalized = String(groupName || "");
+                var slug = normalized
+                    .toLowerCase()
+                    .replace(/\s+/g, "-")
+                    .replace(/[^a-z0-9_-]+/g, "-")
+                    .replace(/-+/g, "-")
+                    .replace(/^-+|-+$/g, "");
+                if (!slug) {
+                    slug = "group";
+                }
+
+                // Deterministic hash keeps IDs stable and avoids collisions for similar slugs.
+                var hash = 2166136261;
+                for (var i = 0; i < normalized.length; i += 1) {
+                    hash ^= normalized.charCodeAt(i);
+                    hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+                }
+                var suffix = (hash >>> 0).toString(36);
+                return "nr-group-tab-" + slug + "-" + suffix;
             }
     
             function makeStableTopFlowTabId(workspaceId) {
@@ -407,14 +425,63 @@
                 };
             }
     
-            function clearTabs(tabApi) {
-                if (!tabApi || typeof tabApi.listTabs !== "function") {
+            function getTabId(tab) {
+                if (!tab) {
+                    return "";
+                }
+                if (typeof tab === "string") {
+                    return tab;
+                }
+                if (typeof tab.id === "string" && tab.id) {
+                    return tab.id;
+                }
+                if (typeof tab.tabId === "string" && tab.tabId) {
+                    return tab.tabId;
+                }
+                if (typeof tab.href === "string" && tab.href.charAt(0) === "#") {
+                    return tab.href.slice(1);
+                }
+                return "";
+            }
+
+            function listTabIds(tabApi, ulId) {
+                var tabIds = [];
+                if (tabApi && typeof tabApi.listTabs === "function") {
+                    (tabApi.listTabs() || []).forEach(function(tabEntry) {
+                        var tabId = getTabId(tabEntry);
+                        if (tabId) {
+                            tabIds.push(tabId);
+                        }
+                    });
+                }
+
+                if (!tabIds.length && ulId) {
+                    $("#" + ulId + " a.red-ui-tab-label[href^='#']").each(function() {
+                        var href = $(this).attr("href") || "";
+                        if (href.charAt(0) === "#") {
+                            tabIds.push(href.slice(1));
+                        }
+                    });
+                }
+
+                var uniqueTabIds = [];
+                var seen = {};
+                tabIds.forEach(function(tabId) {
+                    if (!seen[tabId]) {
+                        seen[tabId] = true;
+                        uniqueTabIds.push(tabId);
+                    }
+                });
+                return uniqueTabIds;
+            }
+
+            function clearTabs(tabApi, ulId) {
+                if (!tabApi || typeof tabApi.removeTab !== "function") {
                     return;
                 }
-    
-                var existing = tabApi.listTabs() || [];
-                existing.slice().forEach(function(id) {
-                    tabApi.removeTab(id);
+
+                listTabIds(tabApi, ulId).forEach(function(tabId) {
+                    tabApi.removeTab(tabId);
                 });
             }
     
@@ -485,6 +552,40 @@
                         delete state.lastWorkspaceByGroup[groupKey];
                     }
                 });
+            }
+
+            function getGroupKeyForTab(tab) {
+                if (tab && typeof tab.groupKey === "string" && tab.groupKey) {
+                    return tab.groupKey;
+                }
+                var tabId = getTabId(tab);
+                if (!tabId) {
+                    var groupHref = $("#" + GROUPS_UL_ID + " li.red-ui-tab.active a.red-ui-tab-label").first().attr("href") || "";
+                    if (groupHref.charAt(0) === "#") {
+                        tabId = groupHref.slice(1);
+                    }
+                }
+                if (tabId && state.groupTabGroupMap[tabId]) {
+                    return state.groupTabGroupMap[tabId];
+                }
+                return "";
+            }
+
+            function getWorkspaceIdForFlowTab(tab) {
+                if (tab && typeof tab.workspaceId === "string" && tab.workspaceId) {
+                    return tab.workspaceId;
+                }
+                var tabId = getTabId(tab);
+                if (!tabId) {
+                    var flowHref = $("#" + FLOWS_UL_ID + " li.red-ui-tab.active a.red-ui-tab-label").first().attr("href") || "";
+                    if (flowHref.charAt(0) === "#") {
+                        tabId = flowHref.slice(1);
+                    }
+                }
+                if (tabId && state.flowTabWorkspaceMap[tabId]) {
+                    return state.flowTabWorkspaceMap[tabId];
+                }
+                return "";
             }
     
             function applyFlowReorder(newOrder) {
@@ -828,7 +929,7 @@
     
             function resetFlowTabsState() {
                 state.suspendFlowChange = true;
-                clearTabs(state.flowTabs);
+                clearTabs(state.flowTabs, FLOWS_UL_ID);
                 state.suspendFlowChange = false;
                 state.flowTabWorkspaceMap = {};
                 state.lastRenderedFlowGroup = null;
@@ -1053,7 +1154,7 @@
     
                 if (groupsChanged) {
                     state.suspendGroupChange = true;
-                    clearTabs(state.groupTabs);
+                    clearTabs(state.groupTabs, GROUPS_UL_ID);
                     state.groupTabGroupMap = {};
     
                     state.model.groups.forEach(function(group) {
@@ -1128,7 +1229,7 @@
     
                 if (flowsChanged) {
                     state.suspendFlowChange = true;
-                    clearTabs(state.flowTabs);
+                    clearTabs(state.flowTabs, FLOWS_UL_ID);
                     state.flowTabWorkspaceMap = {};
     
                     selectedGroup.flows.forEach(function(flow) {
@@ -1335,16 +1436,22 @@
                             applyGroupReorder(newOrder);
                         },
                         onchange: function(tab) {
-                            if (state.suspendGroupChange || !tab) {
+                            if (state.suspendGroupChange) {
                                 return;
                             }
-                            onGroupChange(tab.groupKey);
+                            var groupKey = getGroupKeyForTab(tab);
+                            if (!groupKey) {
+                                debug("group onchange ignored: missing group key", { tab: tab });
+                                return;
+                            }
+                            onGroupChange(groupKey);
                         },
                         ondblclick: function(tab) {
-                            if (!tab || !tab.groupKey) {
+                            var groupKey = getGroupKeyForTab(tab);
+                            if (!groupKey) {
                                 return;
                             }
-                            var entry = state.model.groupByName[tab.groupKey];
+                            var entry = state.model.groupByName[groupKey];
                             if (!entry || !entry.standalone || !entry.standaloneWorkspaceId) {
                                 return;
                             }
@@ -1364,30 +1471,32 @@
                             applyFlowReorder(newOrder);
                         },
                         onchange: function(tab) {
-                            if (state.suspendFlowChange || !tab || !tab.workspaceId) {
+                            var workspaceId = getWorkspaceIdForFlowTab(tab);
+                            if (state.suspendFlowChange || !workspaceId) {
                                 return;
                             }
-                            activateCoreWorkspace(tab.workspaceId);
+                            activateCoreWorkspace(workspaceId);
                         },
                         ondblclick: function(tab) {
-                            if (!tab || !tab.workspaceId) {
+                            var workspaceId = getWorkspaceIdForFlowTab(tab);
+                            if (!workspaceId) {
                                 debug("flow ondblclick ignored: missing tab/workspace");
                                 return;
                             }
                             debug("flow ondblclick received", {
-                                workspaceId: tab.workspaceId,
+                                workspaceId: workspaceId,
                                 pending: state.pendingFlowDoubleWorkspaceId
                             });
-                            if (state.pendingFlowDoubleWorkspaceId !== tab.workspaceId) {
+                            if (state.pendingFlowDoubleWorkspaceId !== workspaceId) {
                                 debug("flow ondblclick blocked by guard", {
-                                    workspaceId: tab.workspaceId,
+                                    workspaceId: workspaceId,
                                     pending: state.pendingFlowDoubleWorkspaceId
                                 });
                                 return;
                             }
                             state.pendingFlowDoubleWorkspaceId = null;
-                            debug("flow ondblclick accepted", { workspaceId: tab.workspaceId });
-                            openWorkspaceEditDialog(tab.workspaceId);
+                            debug("flow ondblclick accepted", { workspaceId: workspaceId });
+                            openWorkspaceEditDialog(workspaceId);
                         }
                     });
     
