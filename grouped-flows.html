@@ -3,7 +3,7 @@
         "use strict";
     
         var PLUGIN_ID = "nr-grouped-flows";
-        var PLUGIN_VERSION = "0.1.30";
+        var PLUGIN_VERSION = "0.1.31";
         var ORIGINAL_UL_ID = "red-ui-workspace-tabs";
         var CONTAINER_ID = "nr-grouped-flows";
         var GROUPS_UL_ID = "nr-grouped-flows-groups";
@@ -967,8 +967,10 @@
                 if (!workspace || !input.length) {
                     return;
                 }
-    
-                var oldValue = normalizeGroupName(workspace[WORKSPACE_GROUP_PROPERTY]);
+
+                var oldValue = normalizeGroupName(
+                    workspace[WORKSPACE_GROUP_PROPERTY] || getPersistedGroup(workspaceId)
+                );
                 var newValue = normalizeGroupName(input.val());
                 if (newValue === oldValue) {
                     return;
@@ -1039,7 +1041,9 @@
                     }
                 }
     
-                row.find("#" + DIALOG_GROUP_INPUT_ID).val(normalizeGroupName(workspace[WORKSPACE_GROUP_PROPERTY]));
+                row.find("#" + DIALOG_GROUP_INPUT_ID).val(
+                    normalizeGroupName(workspace[WORKSPACE_GROUP_PROPERTY] || getPersistedGroup(workspaceId))
+                );
                 bindDialogGroupSave(workspaceId, form);
                 return true;
             }
