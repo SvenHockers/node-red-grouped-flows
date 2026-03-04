@@ -1,10 +1,32 @@
 {
   "name": "node-red-plugin-grouped-flows",
-  "version": "0.1.25",
+  "version": "0.1.26",
   "description": "Replaces the built-in Node-RED flows tab bar with a grouped two-tier tab bar to improve navigation of large Node-RED environments.",
+  "author": "Sven Hockers",
   "license": "Apache-2.0",
-  "keywords": ["node-red", "node-red-plugin", "tabs", "flows"],
-  "files": ["grouped-flows.html", "README.md", "package.json"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SvenHockers/node-red-grouped-flows.git"
+  },
+  "bugs": {
+    "url": "https://github.com/SvenHockers/node-red-grouped-flows/issues"
+  },
+  "homepage": "https://github.com/SvenHockers/node-red-grouped-flows#readme",
+  "keywords": [
+    "node-red",
+    "node-red-plugin",
+    "node-red-editor",
+    "tabs",
+    "flows"
+  ],
+  "files": [
+    "grouped-flows.html",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=14"
+  },
   "node-red": {
     "version": ">=3.0.0",
     "plugins": {
