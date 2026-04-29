@@ -3,7 +3,7 @@
         "use strict";
 
         const PLUGIN_ID = "nr-grouped-flows";
-        const PLUGIN_VERSION = "0.3.1";
+        const PLUGIN_VERSION = "0.3.2";
         const ORIGINAL_UL_ID = "red-ui-workspace-tabs";
         const CONTAINER_ID = "nr-grouped-flows";
         const GROUPS_UL_ID = "nr-grouped-flows-groups";
@@ -107,6 +107,7 @@
             const debugEnabled = isDebugEnabled();
             // T016: state initialised from factory instead of inline literal.
             const state = createInitialState();
+            const adminBase = (RED.settings.httpAdminRoot || "").replace(/\/$/, "");
 
             function debug(message, data) {
                 if (!debugEnabled || !window.console || typeof console.log !== "function") {
@@ -183,7 +184,7 @@
             function loadGroupsFromServer() {
                 const deferred = $.Deferred();
                 $.ajax({
-                    url: "/nr-grouped-flows/groups",
+                    url: adminBase + "/nr-grouped-flows/groups",
                     type: "GET",
                     dataType: "json"
                 }).then(function(data) {
@@ -193,7 +194,8 @@
                         state.persistedGroups = {};
                     }
                     deferred.resolve();
-                }).fail(function() {
+                }).fail(function(jqXHR) {
+                    console.warn("[nr-grouped-flows] Could not load group assignments.", jqXHR.status, jqXHR.responseText);
                     warn("Could not load group assignments from server. Groups will be empty.");
                     state.persistedGroups = {};
                     deferred.resolve();
@@ -210,7 +212,7 @@
                     }
                 });
                 $.ajax({
-                    url: "/nr-grouped-flows/groups",
+                    url: adminBase + "/nr-grouped-flows/groups",
                     type: "POST",
                     contentType: "application/json",
                     data: JSON.stringify(payload)
