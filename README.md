@@ -6,7 +6,7 @@ Group assignments are persisted server-side and shared across all connected edit
 
 ## Requirements
 
-- Node-RED >= 4.0.0
+- Node-RED >= 3.0.0
 - Node.js >= 18
 
 ## Installation
