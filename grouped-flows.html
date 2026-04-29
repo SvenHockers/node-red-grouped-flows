@@ -1,30 +1,39 @@
 <script type="text/javascript">
     (function() {
         "use strict";
-    
-        var PLUGIN_ID = "nr-grouped-flows";
-        var PLUGIN_VERSION = "0.1.31";
-        var ORIGINAL_UL_ID = "red-ui-workspace-tabs";
-        var CONTAINER_ID = "nr-grouped-flows";
-        var GROUPS_UL_ID = "nr-grouped-flows-groups";
-        var FLOWS_UL_ID = "nr-grouped-flows-flows";
-        var WORKSPACE_ROOT_ID = "red-ui-workspace";
-        var WORKSPACE_ENABLED_CLASS = "nr-grouped-flows-enabled";
-        var WORKSPACE_GROUP_PROPERTY = "group";
-        var WORKSPACE_SINGLE_ROW_CLASS = "nr-grouped-flows-single-row";
-        var DIALOG_GROUP_ROW_CLASS = "nr-grouped-flows-group-row";
-        var DIALOG_GROUP_INPUT_ID = "nr-grouped-flows-group-input";
-        var DIALOG_GROUP_SAVE_NS = ".nrGroupedFlowsGroupSave";
-        var GROUP_PERSISTENCE_KEY = "nr-grouped-flows.groups.v1";
-        var BOOT_RETRY_INTERVAL_MS = 250;
-        var BOOT_MAX_RETRIES = 120;
-        var WARN_CORE_TABS_RETRY_AT = 40;
-        var FLOW_DOUBLE_CLICK_WINDOW_MS = 450;
-        var EDIT_DIALOG_DEFER_MS = 40;
-        var GROUP_REORDER_SETTLE_MS = 500;
-        var DEBUG_STORAGE_KEY = "nr-grouped-flows-debug";
-        var pluginRegistered = false;
-    
+
+        const PLUGIN_ID = "nr-grouped-flows";
+        const PLUGIN_VERSION = "0.1.31";
+        const ORIGINAL_UL_ID = "red-ui-workspace-tabs";
+        const CONTAINER_ID = "nr-grouped-flows";
+        const GROUPS_UL_ID = "nr-grouped-flows-groups";
+        const FLOWS_UL_ID = "nr-grouped-flows-flows";
+        const WORKSPACE_ROOT_ID = "red-ui-workspace";
+        const WORKSPACE_ENABLED_CLASS = "nr-grouped-flows-enabled";
+        const WORKSPACE_GROUP_PROPERTY = "group";
+        const WORKSPACE_SINGLE_ROW_CLASS = "nr-grouped-flows-single-row";
+        const DIALOG_GROUP_ROW_CLASS = "nr-grouped-flows-group-row";
+        const DIALOG_GROUP_INPUT_ID = "nr-grouped-flows-group-input";
+        const DIALOG_GROUP_SAVE_NS = ".nrGroupedFlowsGroupSave";
+        const GROUP_PERSISTENCE_KEY = "nr-grouped-flows.groups.v1";
+
+        function getPersistenceKey() {
+            try {
+                const origin = window.location && window.location.origin ? window.location.origin : "";
+                return origin ? GROUP_PERSISTENCE_KEY + "@" + origin : GROUP_PERSISTENCE_KEY;
+            } catch (err) {
+                return GROUP_PERSISTENCE_KEY;
+            }
+        }
+        const BOOT_RETRY_INTERVAL_MS = 250;
+        const BOOT_MAX_RETRIES = 120;
+        const WARN_CORE_TABS_RETRY_AT = 40;
+        const FLOW_DOUBLE_CLICK_WINDOW_MS = 450;
+        const EDIT_DIALOG_DEFER_MS = 40;
+        const GROUP_REORDER_SETTLE_MS = 500;
+        const DEBUG_STORAGE_KEY = "nr-grouped-flows-debug";
+        let pluginRegistered = false;
+
         function isDebugEnabled() {
             try {
                 return window.localStorage && localStorage.getItem(DEBUG_STORAGE_KEY) === "1";
@@ -32,7 +41,7 @@
                 return false;
             }
         }
-    
+
         function setDebugEnabled(enabled) {
             try {
                 if (!window.localStorage) {
@@ -47,21 +56,22 @@
                 // Ignore storage access failures.
             }
         }
-    
+
         function t(key, fallback, options) {
             try {
                 if (window.RED && typeof RED._ === "function") {
-                    return RED._(key, options || {});
+                    return RED._("nr-grouped-flows:" + key, options || {}) || fallback;
                 }
             } catch (err) {
                 // Ignore missing i18n keys and fall back to plain text.
             }
             return fallback;
         }
-    
-        function createController() {
-            var debugEnabled = isDebugEnabled();
-            var state = {
+
+        // T015: Factory returns the canonical initial/reset shape for all controller state.
+        // stop() uses Object.assign(state, createInitialState()) instead of manual field resets.
+        function createInitialState() {
+            return {
                 originalWrapper: null,
                 container: null,
                 groupTabs: null,
@@ -88,6 +98,7 @@
                 lastFlowPointerTime: 0,
                 pendingFlowDoubleWorkspaceId: null,
                 pendingEditOpenTimer: null,
+                dialogFieldRetryTimer: null,
                 applyingFlowReorder: false,
                 applyingGroupReorder: false,
                 skipNextFlowsReorderRebuild: false,
@@ -100,34 +111,44 @@
                 originalEditFlow: null,
                 persistedGroups: null
             };
-    
+        }
+
+        function createController() {
+            const debugEnabled = isDebugEnabled();
+            // T016: state initialised from factory instead of inline literal.
+            const state = createInitialState();
+
             function debug(message, data) {
                 if (!debugEnabled || !window.console || typeof console.log !== "function") {
                     return;
                 }
                 if (typeof data !== "undefined") {
-                    console.log("[nr-grouped-workspace-tabs][debug] " + message, data);
+                    console.log("[nr-grouped-flows][debug] " + message, data);
                 } else {
-                    console.log("[nr-grouped-workspace-tabs][debug] " + message);
+                    console.log("[nr-grouped-flows][debug] " + message);
                 }
             }
-    
+
             function warn(message) {
                 if (window.console && typeof console.warn === "function") {
-                    console.warn("[nr-grouped-workspace-tabs] " + message);
+                    console.warn("[nr-grouped-flows] " + message);
                 }
-                if (RED.notify && typeof RED.notify === "function") {
-                    RED.notify(message, "warning", false, 3000);
+                if (window.RED && RED.notify && typeof RED.notify === "function") {
+                    try {
+                        RED.notify(message, "warning", false, 3000);
+                    } catch (err) {
+                        // Ignore notification failures - the console.warn above is the fallback.
+                    }
                 }
             }
-    
+
             function addFlowEnabled() {
                 if (RED.settings && typeof RED.settings.theme === "function") {
                     return RED.settings.theme("menu.menu-item-workspace-add", true);
                 }
                 return true;
             }
-    
+
             function buildFlowMenu() {
                 return [
                     {
@@ -148,34 +169,52 @@
                     }
                 ];
             }
-    
+
             function normalizeGroupName(value) {
                 return String(value || "").trim();
             }
-    
+
+            function htmlEscape(str) {
+                return String(str || "")
+                    .replace(/&/g, "&amp;")
+                    .replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;")
+                    .replace(/"/g, "&quot;")
+                    .replace(/'/g, "&#39;");
+            }
+
             function getWorkspaceById(workspaceId) {
                 if (!workspaceId || !RED.nodes || typeof RED.nodes.workspace !== "function") {
                     return null;
                 }
                 return RED.nodes.workspace(workspaceId);
             }
-    
+
             function loadPersistedGroups() {
                 try {
                     if (!window.localStorage) {
                         return {};
                     }
-                    var raw = localStorage.getItem(GROUP_PERSISTENCE_KEY);
+                    const legacyKey = GROUP_PERSISTENCE_KEY;
+                    const newKey = getPersistenceKey();
+                    if (legacyKey !== newKey) {
+                        const legacyData = localStorage.getItem(legacyKey);
+                        if (legacyData && !localStorage.getItem(newKey)) {
+                            localStorage.setItem(newKey, legacyData);
+                            localStorage.removeItem(legacyKey);
+                        }
+                    }
+                    const raw = localStorage.getItem(newKey);
                     if (!raw) {
                         return {};
                     }
-                    var parsed = JSON.parse(raw);
+                    const parsed = JSON.parse(raw);
                     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
                         return {};
                     }
-                    var groups = {};
+                    const groups = {};
                     Object.keys(parsed).forEach(function(workspaceId) {
-                        var groupName = normalizeGroupName(parsed[workspaceId]);
+                        const groupName = normalizeGroupName(parsed[workspaceId]);
                         if (workspaceId && groupName) {
                             groups[workspaceId] = groupName;
                         }
@@ -185,24 +224,24 @@
                     return {};
                 }
             }
-    
+
             function ensurePersistedGroupsLoaded() {
                 if (!state.persistedGroups) {
                     state.persistedGroups = loadPersistedGroups();
                 }
             }
-    
+
             function savePersistedGroups() {
                 try {
                     if (!window.localStorage) {
                         return;
                     }
-                    localStorage.setItem(GROUP_PERSISTENCE_KEY, JSON.stringify(state.persistedGroups || {}));
+                    localStorage.setItem(getPersistenceKey(), JSON.stringify(state.persistedGroups || {}));
                 } catch (err) {
                     // Ignore storage write failures.
                 }
             }
-    
+
             function getPersistedGroup(workspaceId) {
                 ensurePersistedGroupsLoaded();
                 if (!workspaceId || !state.persistedGroups) {
@@ -210,14 +249,14 @@
                 }
                 return normalizeGroupName(state.persistedGroups[workspaceId]);
             }
-    
+
             function setPersistedGroup(workspaceId, groupName) {
                 if (!workspaceId) {
                     return;
                 }
                 ensurePersistedGroupsLoaded();
-                var normalized = normalizeGroupName(groupName);
-                var oldValue = normalizeGroupName(state.persistedGroups[workspaceId]);
+                const normalized = normalizeGroupName(groupName);
+                const oldValue = normalizeGroupName(state.persistedGroups[workspaceId]);
                 if (normalized) {
                     if (oldValue === normalized) {
                         return;
@@ -230,13 +269,13 @@
                 }
                 savePersistedGroups();
             }
-    
+
             function prunePersistedGroups(validWorkspaceIds) {
                 ensurePersistedGroupsLoaded();
                 if (!state.persistedGroups) {
                     return false;
                 }
-                var changed = false;
+                let changed = false;
                 Object.keys(state.persistedGroups).forEach(function(workspaceId) {
                     if (!validWorkspaceIds[workspaceId]) {
                         delete state.persistedGroups[workspaceId];
@@ -245,10 +284,10 @@
                 });
                 return changed;
             }
-    
+
             function makeStableGroupTabId(groupName) {
-                var normalized = String(groupName || "");
-                var slug = normalized
+                const normalized = String(groupName || "");
+                let slug = normalized
                     .toLowerCase()
                     .replace(/\s+/g, "-")
                     .replace(/[^a-z0-9_-]+/g, "-")
@@ -259,26 +298,26 @@
                 }
 
                 // Deterministic hash keeps IDs stable and avoids collisions for similar slugs.
-                var hash = 2166136261;
-                for (var i = 0; i < normalized.length; i += 1) {
+                let hash = 2166136261;
+                for (let i = 0; i < normalized.length; i += 1) {
                     hash ^= normalized.charCodeAt(i);
                     hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
                 }
-                var suffix = (hash >>> 0).toString(36);
+                const suffix = (hash >>> 0).toString(36);
                 return "nr-group-tab-" + slug + "-" + suffix;
             }
-    
+
             function makeStableTopFlowTabId(workspaceId) {
                 return "nr-top-flow-tab-" + String(workspaceId || "");
             }
-    
+
             function makeStableFlowTabId(workspaceId) {
                 return "nr-flow-tab-" + String(workspaceId || "");
             }
-    
+
             function getActiveWorkspaceIdFromCore() {
                 if (RED.workspaces && typeof RED.workspaces.active === "function") {
-                    var active = RED.workspaces.active();
+                    const active = RED.workspaces.active();
                     if (typeof active === "string" && active) {
                         return active;
                     }
@@ -286,50 +325,50 @@
                         return active.id;
                     }
                 }
-    
-                var activeLink = $("#" + ORIGINAL_UL_ID + " li.red-ui-tab.active > a.red-ui-tab-label").first();
+
+                const activeLink = $("#" + ORIGINAL_UL_ID + " li.red-ui-tab.active > a.red-ui-tab-label").first();
                 if (!activeLink.length) {
                     return state.lastKnownActiveWorkspaceId;
                 }
-                var href = activeLink.attr("href") || "";
+                const href = activeLink.attr("href") || "";
                 if (!href || href.charAt(0) !== "#") {
                     return state.lastKnownActiveWorkspaceId;
                 }
                 return href.slice(1);
             }
-    
+
             function readCoreTabs() {
-                var items = [];
-                var originalUl = $("#" + ORIGINAL_UL_ID);
-    
+                const items = [];
+                const originalUl = $("#" + ORIGINAL_UL_ID);
+
                 if (!originalUl.length) {
                     return items;
                 }
-    
+
                 originalUl.children("li.red-ui-tab").each(function(index, el) {
-                    var li = $(el);
+                    const li = $(el);
                     if (li.hasClass("hide-tab") || li.hasClass("hide")) {
                         return;
                     }
-    
-                    var link = li.children("a.red-ui-tab-label[href^='#']").first();
+
+                    const link = li.children("a.red-ui-tab-label[href^='#']").first();
                     if (!link.length) {
                         return;
                     }
-    
-                    var href = link.attr("href") || "";
+
+                    const href = link.attr("href") || "";
                     if (href.charAt(0) !== "#") {
                         return;
                     }
-    
-                    var workspaceId = href.slice(1);
-                    var fullLabel = link.find("span.red-ui-text-bidi-aware").first().text().trim();
+
+                    const workspaceId = href.slice(1);
+                    let fullLabel = link.find("span.red-ui-text-bidi-aware").first().text().trim();
                     if (!fullLabel) {
                         fullLabel = link.text().trim() || workspaceId;
                     }
-    
-                    var workspace = getWorkspaceById(workspaceId);
-    
+
+                    const workspace = getWorkspaceById(workspaceId);
+
                     items.push({
                         workspaceId: workspaceId,
                         fullLabel: fullLabel,
@@ -340,28 +379,26 @@
                         active: li.hasClass("active")
                     });
                 });
-    
+
                 return items;
             }
-    
+
             function buildModel() {
                 ensurePersistedGroupsLoaded();
-                var groups = [];
-                var groupByName = {};
-                var workspaceToGroup = {};
-                var activeWorkspaceId = null;
-                var coreTabs = readCoreTabs();
-                var explicitActiveWorkspaceId = getActiveWorkspaceIdFromCore();
-                var validWorkspaceIds = {};
-                var persistedChanged = false;
-    
+                const groups = [];
+                const groupByName = {};
+                const workspaceToGroup = {};
+                let activeWorkspaceId = null;
+                const coreTabs = readCoreTabs();
+                const explicitActiveWorkspaceId = getActiveWorkspaceIdFromCore();
+                const validWorkspaceIds = {};
+
                 coreTabs.forEach(function(item) {
                     validWorkspaceIds[item.workspaceId] = true;
-                    if (item.group && state.persistedGroups[item.workspaceId] !== item.group) {
-                        state.persistedGroups[item.workspaceId] = item.group;
-                        persistedChanged = true;
+                    if (item.group) {
+                        setPersistedGroup(item.workspaceId, item.group);
                     }
-                    var flow = {
+                    const flow = {
                         workspaceId: item.workspaceId,
                         flowTabId: makeStableFlowTabId(item.workspaceId),
                         label: item.fullLabel,
@@ -370,11 +407,11 @@
                         locked: item.locked,
                         changed: item.changed
                     };
-                    var groupName = normalizeGroupName(item.group || getPersistedGroup(item.workspaceId));
-                    var group;
-    
+                    const groupName = normalizeGroupName(item.group || getPersistedGroup(item.workspaceId));
+                    let group;
+
                     if (groupName) {
-                        var groupKey = "group:" + groupName;
+                        const groupKey = "group:" + groupName;
                         group = groupByName[groupKey];
                         if (!group) {
                             group = {
@@ -402,21 +439,16 @@
                         groups.push(group);
                         workspaceToGroup[flow.workspaceId] = group.key;
                     }
-    
+
                     if (item.active || flow.workspaceId === explicitActiveWorkspaceId) {
                         activeWorkspaceId = item.workspaceId;
                     }
                 });
-    
-                if (coreTabs.length) {
-                    if (prunePersistedGroups(validWorkspaceIds)) {
-                        persistedChanged = true;
-                    }
-                    if (persistedChanged) {
-                        savePersistedGroups();
-                    }
+
+                if (coreTabs.length && prunePersistedGroups(validWorkspaceIds)) {
+                    savePersistedGroups();
                 }
-    
+
                 return {
                     groups: groups,
                     groupByName: groupByName,
@@ -424,7 +456,7 @@
                     activeWorkspaceId: activeWorkspaceId || explicitActiveWorkspaceId || state.lastKnownActiveWorkspaceId
                 };
             }
-    
+
             function getTabId(tab) {
                 if (!tab) {
                     return "";
@@ -445,10 +477,10 @@
             }
 
             function listTabIds(tabApi, ulId) {
-                var tabIds = [];
+                const tabIds = [];
                 if (tabApi && typeof tabApi.listTabs === "function") {
                     (tabApi.listTabs() || []).forEach(function(tabEntry) {
-                        var tabId = getTabId(tabEntry);
+                        const tabId = getTabId(tabEntry);
                         if (tabId) {
                             tabIds.push(tabId);
                         }
@@ -457,15 +489,15 @@
 
                 if (!tabIds.length && ulId) {
                     $("#" + ulId + " a.red-ui-tab-label[href^='#']").each(function() {
-                        var href = $(this).attr("href") || "";
+                        const href = $(this).attr("href") || "";
                         if (href.charAt(0) === "#") {
                             tabIds.push(href.slice(1));
                         }
                     });
                 }
 
-                var uniqueTabIds = [];
-                var seen = {};
+                const uniqueTabIds = [];
+                const seen = {};
                 tabIds.forEach(function(tabId) {
                     if (!seen[tabId]) {
                         seen[tabId] = true;
@@ -484,19 +516,19 @@
                     tabApi.removeTab(tabId);
                 });
             }
-    
+
             function arraysEqual(a, b) {
                 if (!a || !b || a.length !== b.length) {
                     return false;
                 }
-                for (var i = 0; i < a.length; i += 1) {
+                for (let i = 0; i < a.length; i += 1) {
                     if (a[i] !== b[i]) {
                         return false;
                     }
                 }
                 return true;
             }
-    
+
             function getGroupSignature(groups) {
                 if (!Array.isArray(groups) || !groups.length) {
                     return "";
@@ -506,10 +538,10 @@
                         group.key || "",
                         group.name || "",
                         group.standalone ? "1" : "0"
-                    ].join("\u001e");
-                }).join("\u001f");
+                    ].join("");
+                }).join("");
             }
-    
+
             function getFlowSignature(flows) {
                 if (!Array.isArray(flows) || !flows.length) {
                     return "";
@@ -522,30 +554,30 @@
                         flow.disabled ? "1" : "0",
                         flow.locked ? "1" : "0",
                         flow.changed ? "1" : "0"
-                    ].join("\u001e");
-                }).join("\u001f");
+                    ].join("");
+                }).join("");
             }
-    
+
             function rememberWorkspaceForGroup(workspaceId) {
                 if (!workspaceId) {
                     return;
                 }
-                var groupKey = state.model.workspaceToGroup[workspaceId];
+                const groupKey = state.model.workspaceToGroup[workspaceId];
                 if (!groupKey) {
                     return;
                 }
                 state.lastWorkspaceByGroup[groupKey] = workspaceId;
             }
-    
+
             function pruneGroupWorkspaceMemory() {
                 Object.keys(state.lastWorkspaceByGroup).forEach(function(groupKey) {
-                    var rememberedWorkspaceId = state.lastWorkspaceByGroup[groupKey];
-                    var group = state.model.groupByName[groupKey];
+                    const rememberedWorkspaceId = state.lastWorkspaceByGroup[groupKey];
+                    const group = state.model.groupByName[groupKey];
                     if (!group || !rememberedWorkspaceId) {
                         delete state.lastWorkspaceByGroup[groupKey];
                         return;
                     }
-                    var existsInGroup = group.flows.some(function(flow) {
+                    const existsInGroup = group.flows.some(function(flow) {
                         return flow.workspaceId === rememberedWorkspaceId;
                     });
                     if (!existsInGroup) {
@@ -558,9 +590,9 @@
                 if (tab && typeof tab.groupKey === "string" && tab.groupKey) {
                     return tab.groupKey;
                 }
-                var tabId = getTabId(tab);
+                let tabId = getTabId(tab);
                 if (!tabId) {
-                    var groupHref = $("#" + GROUPS_UL_ID + " li.red-ui-tab.active a.red-ui-tab-label").first().attr("href") || "";
+                    const groupHref = $("#" + GROUPS_UL_ID + " li.red-ui-tab.active a.red-ui-tab-label").first().attr("href") || "";
                     if (groupHref.charAt(0) === "#") {
                         tabId = groupHref.slice(1);
                     }
@@ -575,9 +607,9 @@
                 if (tab && typeof tab.workspaceId === "string" && tab.workspaceId) {
                     return tab.workspaceId;
                 }
-                var tabId = getTabId(tab);
+                let tabId = getTabId(tab);
                 if (!tabId) {
-                    var flowHref = $("#" + FLOWS_UL_ID + " li.red-ui-tab.active a.red-ui-tab-label").first().attr("href") || "";
+                    const flowHref = $("#" + FLOWS_UL_ID + " li.red-ui-tab.active a.red-ui-tab-label").first().attr("href") || "";
                     if (flowHref.charAt(0) === "#") {
                         tabId = flowHref.slice(1);
                     }
@@ -587,7 +619,7 @@
                 }
                 return "";
             }
-    
+
             function applyFlowReorder(newOrder) {
                 if (state.applyingFlowReorder) {
                     return;
@@ -595,22 +627,22 @@
                 if (!Array.isArray(newOrder) || !newOrder.length) {
                     return;
                 }
-    
-                var activeGroupKey = state.activeGroup;
-                var activeGroup = activeGroupKey ? state.model.groupByName[activeGroupKey] : null;
+
+                const activeGroupKey = state.activeGroup;
+                const activeGroup = activeGroupKey ? state.model.groupByName[activeGroupKey] : null;
                 if (!activeGroup || !activeGroup.flows || activeGroup.flows.length < 2) {
                     return;
                 }
-    
-                var oldGroupWorkspaceOrder = activeGroup.flows.map(function(flow) {
+
+                const oldGroupWorkspaceOrder = activeGroup.flows.map(function(flow) {
                     return flow.workspaceId;
                 });
-                var newGroupWorkspaceOrder = newOrder.map(function(tabId) {
+                const newGroupWorkspaceOrder = newOrder.map(function(tabId) {
                         return state.flowTabWorkspaceMap[tabId];
                     }).filter(function(workspaceId) {
                         return !!workspaceId;
                     });
-    
+
                 if (newGroupWorkspaceOrder.length !== oldGroupWorkspaceOrder.length) {
                     debug("flow reorder ignored: mapping mismatch", {
                         group: activeGroupKey,
@@ -620,7 +652,7 @@
                     });
                     return;
                 }
-    
+
                 if (arraysEqual(oldGroupWorkspaceOrder, newGroupWorkspaceOrder)) {
                     debug("flow reorder ignored: no effective change", {
                         group: activeGroupKey,
@@ -628,40 +660,40 @@
                     });
                     return;
                 }
-    
-                var coreWorkspaceOrder = readCoreTabs().map(function(item) {
+
+                const coreWorkspaceOrder = readCoreTabs().map(function(item) {
                     return item.workspaceId;
                 });
                 if (!coreWorkspaceOrder.length) {
                     debug("flow reorder ignored: no core workspace order available");
                     return;
                 }
-    
-                var inGroup = {};
+
+                const inGroup = {};
                 oldGroupWorkspaceOrder.forEach(function(workspaceId) {
                     inGroup[workspaceId] = true;
                 });
-    
-                var queue = newGroupWorkspaceOrder.slice();
-                var updatedWorkspaceOrder = coreWorkspaceOrder.map(function(workspaceId) {
+
+                const queue = newGroupWorkspaceOrder.slice();
+                const updatedWorkspaceOrder = coreWorkspaceOrder.map(function(workspaceId) {
                     if (inGroup[workspaceId]) {
                         return queue.shift();
                     }
                     return workspaceId;
                 });
-    
+
                 if (arraysEqual(coreWorkspaceOrder, updatedWorkspaceOrder)) {
                     debug("flow reorder ignored: computed global order unchanged", {
                         order: updatedWorkspaceOrder
                     });
                     return;
                 }
-    
+
                 if (!RED.workspaces || typeof RED.workspaces.order !== "function") {
                     warn("Grouped tabs cannot reorder flows because RED.workspaces.order is unavailable.");
                     return;
                 }
-    
+
                 state.applyingFlowReorder = true;
                 debug("applying flow reorder via RED.workspaces.order", {
                     group: activeGroupKey,
@@ -669,7 +701,7 @@
                     newGroupOrder: newGroupWorkspaceOrder,
                     globalOrder: updatedWorkspaceOrder
                 });
-    
+
                 try {
                     RED.workspaces.order(updatedWorkspaceOrder);
                 } finally {
@@ -679,7 +711,7 @@
                     }, 0);
                 }
             }
-    
+
             function applyGroupReorder(newOrder) {
                 if (state.applyingGroupReorder) {
                     return;
@@ -687,20 +719,20 @@
                 if (!Array.isArray(newOrder) || !newOrder.length) {
                     return;
                 }
-    
+
                 if (!state.model.groups || state.model.groups.length < 2) {
                     return;
                 }
-    
-                var oldGroupOrder = state.model.groups.map(function(group) {
+
+                const oldGroupOrder = state.model.groups.map(function(group) {
                     return group.key;
                 });
-                var newGroupOrder = newOrder.map(function(tabId) {
+                const newGroupOrder = newOrder.map(function(tabId) {
                     return state.groupTabGroupMap[tabId];
                 }).filter(function(groupKey) {
                     return !!groupKey;
                 });
-    
+
                 if (newGroupOrder.length !== oldGroupOrder.length) {
                     debug("group reorder ignored: mapping mismatch", {
                         oldOrder: oldGroupOrder,
@@ -709,35 +741,35 @@
                     });
                     return;
                 }
-    
+
                 if (arraysEqual(oldGroupOrder, newGroupOrder)) {
                     debug("group reorder ignored: no effective change", {
                         order: newGroupOrder
                     });
                     return;
                 }
-    
-                var groupFlowsByName = {};
+
+                const groupFlowsByName = {};
                 state.model.groups.forEach(function(group) {
                     groupFlowsByName[group.key] = group.flows.map(function(flow) {
                         return flow.workspaceId;
                     });
                 });
-    
-                var reorderedWorkspaceOrder = [];
+
+                let reorderedWorkspaceOrder = [];
                 newGroupOrder.forEach(function(groupKey) {
                     reorderedWorkspaceOrder = reorderedWorkspaceOrder.concat(groupFlowsByName[groupKey] || []);
                 });
-    
-                var coreWorkspaceOrder = readCoreTabs().map(function(item) {
+
+                const coreWorkspaceOrder = readCoreTabs().map(function(item) {
                     return item.workspaceId;
                 });
-    
+
                 if (!coreWorkspaceOrder.length) {
                     debug("group reorder ignored: no core workspace order available");
                     return;
                 }
-    
+
                 if (reorderedWorkspaceOrder.length !== coreWorkspaceOrder.length) {
                     debug("group reorder ignored: computed workspace size mismatch", {
                         coreOrder: coreWorkspaceOrder,
@@ -745,20 +777,20 @@
                     });
                     return;
                 }
-    
+
                 if (arraysEqual(coreWorkspaceOrder, reorderedWorkspaceOrder)) {
                     debug("group reorder ignored: global order unchanged", {
                         order: reorderedWorkspaceOrder
                     });
                     return;
                 }
-    
+
                 if (!RED.workspaces || typeof RED.workspaces.order !== "function") {
                     warn("Grouped tabs cannot reorder groups because RED.workspaces.order is unavailable.");
                     return;
                 }
-    
-                var groupsByName = {};
+
+                const groupsByName = {};
                 state.model.groups.forEach(function(group) {
                     groupsByName[group.key] = group;
                 });
@@ -768,7 +800,7 @@
                     return !!group;
                 });
                 state.lastRenderedGroupSignature = getGroupSignature(state.model.groups);
-    
+
                 state.applyingGroupReorder = true;
                 state.skipNextFlowsReorderRebuild = true;
                 debug("applying group reorder via RED.workspaces.order", {
@@ -776,7 +808,7 @@
                     newGroupOrder: newGroupOrder,
                     globalOrder: reorderedWorkspaceOrder
                 });
-    
+
                 try {
                     RED.workspaces.order(reorderedWorkspaceOrder);
                 } finally {
@@ -786,53 +818,49 @@
                     }, GROUP_REORDER_SETTLE_MS);
                 }
             }
-    
+
             function activateCoreWorkspace(workspaceId) {
                 if (!workspaceId) {
                     return;
                 }
-    
+
                 if (workspaceId === getActiveWorkspaceIdFromCore()) {
                     debug("activateCoreWorkspace skipped: already active", { workspaceId: workspaceId });
                     return;
                 }
-    
+
                 state.lastKnownActiveWorkspaceId = workspaceId;
                 debug("activateCoreWorkspace", { workspaceId: workspaceId });
-    
+
                 if (RED.workspaces && typeof RED.workspaces.show === "function") {
                     debug("activateCoreWorkspace using RED.workspaces.show", { workspaceId: workspaceId });
                     RED.workspaces.show(workspaceId);
                     return;
                 }
-    
-                var coreLink = $("#" + ORIGINAL_UL_ID + " a.red-ui-tab-label").filter(function() {
+
+                const coreLink = $("#" + ORIGINAL_UL_ID + " a.red-ui-tab-label").filter(function() {
                     return ($(this).attr("href") || "") === ("#" + workspaceId);
                 }).first();
-    
+
                 if (!coreLink.length) {
-                    if (RED.workspaces && typeof RED.workspaces.show === "function") {
-                        debug("activateCoreWorkspace fallback RED.workspaces.show", { workspaceId: workspaceId });
-                        RED.workspaces.show(workspaceId);
-                    }
                     debug("activateCoreWorkspace failed: core link not found", { workspaceId: workspaceId });
                     return;
                 }
-    
+
                 debug("activateCoreWorkspace fallback synthetic click", { workspaceId: workspaceId });
                 coreLink.trigger($.Event("mousedown", { which: 1 }));
                 coreLink.trigger($.Event("mouseup", { which: 1 }));
             }
-    
+
             function performOpenWorkspaceEditDialog(workspaceId) {
                 if (!workspaceId) {
                     return;
                 }
-    
-                var handled = false;
-                var workspace = null;
-                var subflow = null;
-    
+
+                let handled = false;
+                let workspace = null;
+                let subflow = null;
+
                 if (RED.workspaces && typeof RED.workspaces.edit === "function") {
                     try {
                         debug("openWorkspaceEditDialog via RED.workspaces.edit", { workspaceId: workspaceId });
@@ -845,9 +873,9 @@
                         });
                     }
                 }
-    
+
                 workspace = getWorkspaceById(workspaceId);
-    
+
                 if (!workspace) {
                     if (RED.nodes && typeof RED.nodes.subflow === "function") {
                         subflow = RED.nodes.subflow(workspaceId);
@@ -862,21 +890,21 @@
                     RED.editor.editFlow(workspace);
                     handled = true;
                 }
-    
+
                 if (handled) {
                     return;
                 }
-    
-                var coreLink = $("#" + ORIGINAL_UL_ID + " a.red-ui-tab-label").filter(function() {
+
+                const coreLink = $("#" + ORIGINAL_UL_ID + " a.red-ui-tab-label").filter(function() {
                     return ($(this).attr("href") || "") === ("#" + workspaceId);
                 }).first();
-    
+
                 if (coreLink.length) {
                     debug("openWorkspaceEditDialog via core link dblclick fallback", { workspaceId: workspaceId });
                     coreLink.trigger($.Event("dblclick", { which: 1 }));
                     return;
                 }
-    
+
                 debug("openWorkspaceEditDialog failed: no edit path available", {
                     workspaceId: workspaceId,
                     hasWorkspace: !!workspace,
@@ -886,39 +914,39 @@
                     hasEditorEditSubflow: !!(RED.editor && typeof RED.editor.editSubflow === "function")
                 });
             }
-    
+
             function openWorkspaceEditDialog(workspaceId) {
                 if (!workspaceId) {
                     return;
                 }
-    
+
                 if (state.pendingEditOpenTimer) {
                     clearTimeout(state.pendingEditOpenTimer);
                     state.pendingEditOpenTimer = null;
                 }
-    
+
                 // Defer edit opening slightly so tab activation/click handlers finish first.
                 state.pendingEditOpenTimer = setTimeout(function() {
                     state.pendingEditOpenTimer = null;
                     performOpenWorkspaceEditDialog(workspaceId);
                 }, EDIT_DIALOG_DEFER_MS);
             }
-    
+
             function markFlowTabWorkspaces() {
-                var flowsUl = $("#" + FLOWS_UL_ID);
+                const flowsUl = $("#" + FLOWS_UL_ID);
                 if (!flowsUl.length) {
                     return;
                 }
-    
+
                 flowsUl.children("li.red-ui-tab").each(function(index, el) {
-                    var li = $(el);
-                    var href = $(this).children("a.red-ui-tab-label").attr("href") || "";
+                    const li = $(el);
+                    const href = li.children("a.red-ui-tab-label").attr("href") || "";
                     if (href.charAt(0) !== "#") {
                         li.removeAttr("data-workspace-id");
                         return;
                     }
-                    var tabId = href.slice(1);
-                    var workspaceId = state.flowTabWorkspaceMap[tabId];
+                    const tabId = href.slice(1);
+                    const workspaceId = state.flowTabWorkspaceMap[tabId];
                     if (workspaceId) {
                         li.attr("data-workspace-id", workspaceId);
                     } else {
@@ -926,7 +954,7 @@
                     }
                 });
             }
-    
+
             function resetFlowTabsState() {
                 state.suspendFlowChange = true;
                 clearTabs(state.flowTabs, FLOWS_UL_ID);
@@ -936,9 +964,9 @@
                 state.lastRenderedFlowSignature = "";
                 state.lastRenderedActiveFlowTab = null;
             }
-    
+
             function setFlowRowVisible(visible) {
-                var flowWrapper = $("#" + FLOWS_UL_ID).closest(".red-ui-tabs");
+                const flowWrapper = $("#" + FLOWS_UL_ID).closest(".red-ui-tabs");
                 if (flowWrapper.length) {
                     if (visible) {
                         flowWrapper.show();
@@ -948,9 +976,9 @@
                 }
                 $("#" + WORKSPACE_ROOT_ID).toggleClass(WORKSPACE_SINGLE_ROW_CLASS, !visible);
             }
-    
+
             function findVisibleDialogForm() {
-                var form = $("#dialog-form");
+                let form = $("#dialog-form");
                 if (form.length && form.is(":visible")) {
                     return form.first();
                 }
@@ -960,22 +988,22 @@
                 }
                 return $();
             }
-    
+
             function persistDialogGroupValue(workspaceId) {
-                var workspace = getWorkspaceById(workspaceId);
-                var input = $("#" + DIALOG_GROUP_INPUT_ID);
+                const workspace = getWorkspaceById(workspaceId);
+                const input = $("#" + DIALOG_GROUP_INPUT_ID);
                 if (!workspace || !input.length) {
                     return;
                 }
 
-                var oldValue = normalizeGroupName(
+                const oldValue = normalizeGroupName(
                     workspace[WORKSPACE_GROUP_PROPERTY] || getPersistedGroup(workspaceId)
                 );
-                var newValue = normalizeGroupName(input.val());
+                const newValue = normalizeGroupName(input.val());
                 if (newValue === oldValue) {
                     return;
                 }
-    
+
                 if (newValue) {
                     workspace[WORKSPACE_GROUP_PROPERTY] = newValue;
                 } else {
@@ -992,13 +1020,17 @@
                     newGroup: newValue
                 });
             }
-    
+
             function bindDialogGroupSave(workspaceId, form) {
                 if (!workspaceId || !form || !form.length) {
                     return;
                 }
-    
-                var saveButtons = $("#node-dialog-ok, #node-dialog-ok-save, .red-ui-tray-footer button.red-ui-button.primary");
+
+                const tray = form.closest(".red-ui-tray");
+                let saveButtons = $("#node-dialog-ok, #node-dialog-ok-save");
+                if (tray.length) {
+                    saveButtons = saveButtons.add(tray.find("button.red-ui-button.primary"));
+                }
                 saveButtons.off(DIALOG_GROUP_SAVE_NS).on("click" + DIALOG_GROUP_SAVE_NS, function() {
                     setTimeout(function() {
                         persistDialogGroupValue(workspaceId);
@@ -1010,29 +1042,29 @@
                     }, 0);
                 });
             }
-    
+
             function ensureDialogGroupField(workspaceId) {
-                var workspace = getWorkspaceById(workspaceId);
+                const workspace = getWorkspaceById(workspaceId);
                 if (!workspace) {
                     return false;
                 }
-    
-                var form = findVisibleDialogForm();
+
+                const form = findVisibleDialogForm();
                 if (!form.length) {
                     return false;
                 }
-    
-                var row = form.find("." + DIALOG_GROUP_ROW_CLASS).first();
+
+                let row = form.find("." + DIALOG_GROUP_ROW_CLASS).first();
                 if (!row.length) {
                     row = $('<div class="form-row ' + DIALOG_GROUP_ROW_CLASS + '"></div>');
                     row.append('<label for="' + DIALOG_GROUP_INPUT_ID + '"><i class="fa fa-folder-open"></i> ' + t("Group", "Group") + "</label>");
                     row.append('<input type="text" id="' + DIALOG_GROUP_INPUT_ID + '" placeholder="' + t("Optional group", "Optional group") + '">');
-    
-                    var infoRow = form.find("#node-input-info").closest(".form-row");
+
+                    const infoRow = form.find("#node-input-info").closest(".form-row");
                     if (infoRow.length) {
                         infoRow.before(row);
                     } else {
-                        var labelRow = form.find("#node-input-label").closest(".form-row");
+                        const labelRow = form.find("#node-input-label").closest(".form-row");
                         if (labelRow.length) {
                             labelRow.after(row);
                         } else {
@@ -1040,41 +1072,48 @@
                         }
                     }
                 }
-    
+
                 row.find("#" + DIALOG_GROUP_INPUT_ID).val(
                     normalizeGroupName(workspace[WORKSPACE_GROUP_PROPERTY] || getPersistedGroup(workspaceId))
                 );
                 bindDialogGroupSave(workspaceId, form);
                 return true;
             }
-    
+
             function scheduleEnsureDialogGroupField(workspaceId) {
                 if (!workspaceId) {
                     return;
                 }
-    
-                var attempts = 0;
+
+                if (state.dialogFieldRetryTimer) {
+                    clearTimeout(state.dialogFieldRetryTimer);
+                    state.dialogFieldRetryTimer = null;
+                }
+
+                let attempts = 0;
                 function attempt() {
+                    state.dialogFieldRetryTimer = null;
+                    if (!state.container) { return; }
                     if (ensureDialogGroupField(workspaceId)) {
                         return;
                     }
                     attempts += 1;
                     if (attempts < 20) {
-                        setTimeout(attempt, 25);
+                        state.dialogFieldRetryTimer = setTimeout(attempt, 25);
                     }
                 }
-                setTimeout(attempt, 0);
+                state.dialogFieldRetryTimer = setTimeout(attempt, 0);
             }
-    
+
             function patchEditFlowDialog() {
                 if (state.wrappedEditFlow || !RED.editor || typeof RED.editor.editFlow !== "function") {
                     return;
                 }
-    
+
                 state.originalEditFlow = RED.editor.editFlow;
                 state.wrappedEditFlow = function(workspace) {
-                    var result = state.originalEditFlow.apply(this, arguments);
-                    var workspaceId = workspace && typeof workspace === "object" ? workspace.id : workspace;
+                    const result = state.originalEditFlow.apply(this, arguments);
+                    const workspaceId = workspace && typeof workspace === "object" ? workspace.id : workspace;
                     if (workspaceId) {
                         scheduleEnsureDialogGroupField(workspaceId);
                     }
@@ -1082,7 +1121,7 @@
                 };
                 RED.editor.editFlow = state.wrappedEditFlow;
             }
-    
+
             function unpatchEditFlowDialog() {
                 if (!state.wrappedEditFlow || !state.originalEditFlow || !RED.editor) {
                     return;
@@ -1095,38 +1134,38 @@
                 $("#node-dialog-ok, #node-dialog-ok-save, .red-ui-tray-footer button.red-ui-button.primary").off(DIALOG_GROUP_SAVE_NS);
                 $("#dialog-form").off(DIALOG_GROUP_SAVE_NS);
             }
-    
+
             function bindTabDomEvents() {
-                var groupsUl = $("#" + GROUPS_UL_ID);
-                var flowsUl = $("#" + FLOWS_UL_ID);
-    
+                const groupsUl = $("#" + GROUPS_UL_ID);
+                const flowsUl = $("#" + FLOWS_UL_ID);
+
                 groupsUl.off(".nrGroupedTabs");
                 flowsUl.off(".nrGroupedTabs");
-    
+
                 groupsUl.on("mousedown.nrGroupedTabs", "li.red-ui-tab", function() {
                     state.lastFlowPointerWorkspaceId = null;
                     state.lastFlowPointerTime = 0;
                     state.pendingFlowDoubleWorkspaceId = null;
                     debug("group mousedown cleared pending double-click state");
                 });
-    
+
                 flowsUl.on("mousedown.nrGroupedTabs", "li.red-ui-tab", function() {
-                    var li = $(this);
-                    var tabId = li.data("tabId");
+                    const li = $(this);
+                    let tabId = li.data("tabId");
                     if (!tabId) {
-                        var href = li.children("a.red-ui-tab-label").attr("href") || "";
+                        const href = li.children("a.red-ui-tab-label").attr("href") || "";
                         if (href.charAt(0) === "#") {
                             tabId = href.slice(1);
                         }
                     }
-    
-                    var workspaceId = li.attr("data-workspace-id") || state.flowTabWorkspaceMap[tabId];
+
+                    const workspaceId = li.attr("data-workspace-id") || state.flowTabWorkspaceMap[tabId];
                     if (!workspaceId) {
                         debug("flow mousedown without workspace mapping", { tabId: tabId });
                         return;
                     }
-    
-                    var now = Date.now();
+
+                    const now = Date.now();
                     if (
                         state.lastFlowPointerWorkspaceId === workspaceId &&
                         (now - state.lastFlowPointerTime) < FLOW_DOUBLE_CLICK_WINDOW_MS
@@ -1137,45 +1176,45 @@
                         state.pendingFlowDoubleWorkspaceId = null;
                         debug("flow mousedown single click", { workspaceId: workspaceId });
                     }
-    
+
                     state.lastFlowPointerWorkspaceId = workspaceId;
                     state.lastFlowPointerTime = now;
                 });
             }
-    
+
             function unbindTabDomEvents() {
                 $("#" + GROUPS_UL_ID).off(".nrGroupedTabs");
                 $("#" + FLOWS_UL_ID).off(".nrGroupedTabs");
             }
-    
+
             function renderGroupTabs() {
                 if (!state.groupTabs) {
                     return;
                 }
-    
-                var currentSignature = getGroupSignature(state.model.groups);
-                var groupsChanged = currentSignature !== state.lastRenderedGroupSignature;
-    
+
+                const currentSignature = getGroupSignature(state.model.groups);
+                const groupsChanged = currentSignature !== state.lastRenderedGroupSignature;
+
                 if (groupsChanged) {
                     state.suspendGroupChange = true;
                     clearTabs(state.groupTabs, GROUPS_UL_ID);
                     state.groupTabGroupMap = {};
-    
+
                     state.model.groups.forEach(function(group) {
                         state.groupTabs.addTab({
                             id: group.tabId,
-                            label: group.name,
-                            name: group.name,
+                            label: htmlEscape(group.name),
+                            name: htmlEscape(group.name),
                             groupKey: group.key
                         });
                         state.groupTabGroupMap[group.tabId] = group.key;
                     });
-    
+
                     state.lastRenderedGroupSignature = currentSignature;
                     state.lastRenderedActiveGroup = null;
                     state.suspendGroupChange = false;
                 }
-    
+
                 if (
                     state.activeGroup &&
                     state.model.groupByName[state.activeGroup] &&
@@ -1187,29 +1226,29 @@
                     state.lastRenderedActiveGroup = state.activeGroup;
                 }
             }
-    
+
             function renderFlowTabs(groupKey, activateFirstIfNeeded) {
                 if (!state.flowTabs) {
                     return;
                 }
-    
-                var selectedGroup = state.model.groupByName[groupKey];
+
+                const selectedGroup = state.model.groupByName[groupKey];
                 if (!selectedGroup) {
                     setFlowRowVisible(false);
                     resetFlowTabsState();
                     return;
                 }
-    
+
                 if (selectedGroup.standalone) {
                     setFlowRowVisible(false);
                     resetFlowTabsState();
-    
-                    var standaloneFlow = selectedGroup.flows[0];
+
+                    const standaloneFlow = selectedGroup.flows[0];
                     if (!standaloneFlow) {
                         return;
                     }
-    
-                    var activeStandaloneWorkspaceId = state.model.activeWorkspaceId || getActiveWorkspaceIdFromCore();
+
+                    const activeStandaloneWorkspaceId = state.model.activeWorkspaceId || getActiveWorkspaceIdFromCore();
                     if (
                         activateFirstIfNeeded &&
                         standaloneFlow.workspaceId &&
@@ -1222,26 +1261,26 @@
                     state.lastWorkspaceByGroup[groupKey] = standaloneFlow.workspaceId;
                     return;
                 }
-    
+
                 setFlowRowVisible(true);
-    
-                var currentFlowSignature = getFlowSignature(selectedGroup.flows);
-                var flowsChanged = (
+
+                const currentFlowSignature = getFlowSignature(selectedGroup.flows);
+                const flowsChanged = (
                     state.lastRenderedFlowGroup !== groupKey ||
                     state.lastRenderedFlowSignature !== currentFlowSignature
                 );
-    
+
                 if (flowsChanged) {
                     state.suspendFlowChange = true;
                     clearTabs(state.flowTabs, FLOWS_UL_ID);
                     state.flowTabWorkspaceMap = {};
-    
+
                     selectedGroup.flows.forEach(function(flow) {
                         state.flowTabs.addTab({
                             id: flow.flowTabId,
-                            label: flow.label,
-                            name: flow.fullLabel,
-                            fullLabel: flow.fullLabel,
+                            label: htmlEscape(flow.label),
+                            name: htmlEscape(flow.fullLabel),
+                            fullLabel: htmlEscape(flow.fullLabel),
                             workspaceId: flow.workspaceId,
                             disabled: flow.disabled,
                             locked: flow.locked,
@@ -1250,24 +1289,24 @@
                         state.flowTabWorkspaceMap[flow.flowTabId] = flow.workspaceId;
                     });
                     markFlowTabWorkspaces();
-    
+
                     state.lastRenderedFlowGroup = groupKey;
                     state.lastRenderedFlowSignature = currentFlowSignature;
                     state.lastRenderedActiveFlowTab = null;
                     state.suspendFlowChange = false;
                 }
-    
-                var activeWorkspaceId = state.model.activeWorkspaceId || getActiveWorkspaceIdFromCore();
-                var selectedFlow = null;
-                var activeFlowInGroup = null;
-                var rememberedWorkspaceId = state.lastWorkspaceByGroup[groupKey];
-    
+
+                const activeWorkspaceId = state.model.activeWorkspaceId || getActiveWorkspaceIdFromCore();
+                let selectedFlow = null;
+                let activeFlowInGroup = null;
+                const rememberedWorkspaceId = state.lastWorkspaceByGroup[groupKey];
+
                 if (activeWorkspaceId) {
                     activeFlowInGroup = selectedGroup.flows.find(function(flow) {
                         return flow.workspaceId === activeWorkspaceId;
                     }) || null;
                 }
-    
+
                 if (activeFlowInGroup) {
                     selectedFlow = activeFlowInGroup;
                 } else if (rememberedWorkspaceId) {
@@ -1275,11 +1314,11 @@
                         return flow.workspaceId === rememberedWorkspaceId;
                     }) || null;
                 }
-    
+
                 if (!selectedFlow && selectedGroup.flows.length) {
                     selectedFlow = selectedGroup.flows[0];
                 }
-    
+
                 if (
                     activateFirstIfNeeded &&
                     selectedFlow &&
@@ -1289,7 +1328,7 @@
                         activateCoreWorkspace(selectedFlow.workspaceId);
                     }, 0);
                 }
-    
+
                 if (selectedFlow) {
                     if (state.lastRenderedActiveFlowTab !== selectedFlow.flowTabId) {
                         state.suspendFlowChange = true;
@@ -1302,53 +1341,54 @@
                     state.lastRenderedActiveFlowTab = null;
                 }
             }
-    
+
             function onGroupChange(groupKey) {
                 state.activeGroup = groupKey;
                 state.lastRenderedActiveGroup = groupKey;
-    
+
                 // Group click shows and activates the group's currently remembered flow (or first flow).
                 renderFlowTabs(groupKey, true);
             }
-    
+
             function rebuild() {
                 if (!mount()) {
-                    waitForCoreTabs();
+                    // DOM not initialised yet — should not normally happen since setupDOM()
+                    // is called before the first rebuild, but guard defensively.
                     return;
                 }
-    
+
                 state.model = buildModel();
                 state.lastKnownActiveWorkspaceId = state.model.activeWorkspaceId || state.lastKnownActiveWorkspaceId;
                 rememberWorkspaceForGroup(state.model.activeWorkspaceId);
                 pruneGroupWorkspaceMemory();
-    
+
                 if (state.model.activeWorkspaceId) {
-                    var groupFromActive = state.model.workspaceToGroup[state.model.activeWorkspaceId];
+                    const groupFromActive = state.model.workspaceToGroup[state.model.activeWorkspaceId];
                     if (groupFromActive) {
                         state.activeGroup = groupFromActive;
                     }
                 }
-    
+
                 if (!state.activeGroup || !state.model.groupByName[state.activeGroup]) {
                     state.activeGroup = state.model.groups.length ? state.model.groups[0].key : null;
                 }
-    
+
                 renderGroupTabs();
                 renderFlowTabs(state.activeGroup, false);
             }
-    
+
             function scheduleRebuild() {
                 if (state.rebuildTimer) {
                     clearTimeout(state.rebuildTimer);
                 }
                 state.rebuildTimer = setTimeout(rebuild, 0);
             }
-    
+
             function bindEvents() {
                 if (!RED.events || state.eventBindings.length) {
                     return;
                 }
-    
+
                 [
                     "flows:add",
                     "flows:remove",
@@ -1358,13 +1398,13 @@
                     "workspace:show",
                     "workspace:hide"
                 ].forEach(function(name) {
-                    var handler = function(activeWorkspaceId) {
+                    const handler = function(activeWorkspaceId) {
                         if (name === "flows:reorder" && state.skipNextFlowsReorderRebuild) {
                             state.skipNextFlowsReorderRebuild = false;
                             debug("flows:reorder rebuild skipped (internal group reorder)");
                             return;
                         }
-    
+
                         if (name === "workspace:change") {
                             if (typeof activeWorkspaceId === "string" && activeWorkspaceId) {
                                 state.lastKnownActiveWorkspaceId = activeWorkspaceId;
@@ -1385,166 +1425,170 @@
                     state.eventBindings.push({ name: name, handler: handler });
                 });
             }
-    
+
             function unbindEvents() {
                 if (!RED.events || !state.eventBindings.length) {
                     return;
                 }
-    
-                var off = RED.events.off || RED.events.removeListener;
+
+                const off = RED.events.off || RED.events.removeListener;
                 if (typeof off === "function") {
                     state.eventBindings.forEach(function(binding) {
                         off.call(RED.events, binding.name, binding.handler);
                     });
                 }
-    
+
                 state.eventBindings = [];
             }
-    
-            function mount() {
+
+            // T019: One-time DOM and tab setup. Called once from waitForCoreTabs().
+            // Returns true on success, false if prerequisites are not yet available.
+            function setupDOM() {
                 if (!RED.tabs || typeof RED.tabs.create !== "function") {
                     return false;
                 }
-    
-                var originalUl = $("#" + ORIGINAL_UL_ID);
+
+                const originalUl = $("#" + ORIGINAL_UL_ID);
                 if (!originalUl.length) {
                     return false;
                 }
-    
-                var originalWrapper = originalUl.closest(".red-ui-tabs");
+
+                const originalWrapper = originalUl.closest(".red-ui-tabs");
                 if (!originalWrapper.length) {
                     return false;
                 }
-    
+
                 state.originalWrapper = originalWrapper;
-    
-                if (!state.container || !state.container.length) {
-                    state.container = $('<div id="' + CONTAINER_ID + '" class="nr-grouped-flows"></div>');
-                    state.container.append('<ul id="' + GROUPS_UL_ID + '"></ul>');
-                    state.container.append('<ul id="' + FLOWS_UL_ID + '"></ul>');
-    
-                    originalWrapper.after(state.container);
-    
-                    state.groupTabs = RED.tabs.create({
-                        id: GROUPS_UL_ID,
-                        scrollable: true,
-                        sortable: true,
-                        addButton: addFlowEnabled() ? "core:add-flow" : undefined,
-                        addButtonCaption: t("workspace.addFlow", "Add flow"),
-                        menu: buildFlowMenu,
-                        onreorder: function(oldOrder, newOrder) {
-                            debug("group onreorder", {
-                                oldOrder: oldOrder,
-                                newOrder: newOrder
-                            });
-                            applyGroupReorder(newOrder);
-                        },
-                        onchange: function(tab) {
-                            if (state.suspendGroupChange) {
-                                return;
-                            }
-                            var groupKey = getGroupKeyForTab(tab);
-                            if (!groupKey) {
-                                debug("group onchange ignored: missing group key", { tab: tab });
-                                return;
-                            }
-                            onGroupChange(groupKey);
-                        },
-                        ondblclick: function(tab) {
-                            var groupKey = getGroupKeyForTab(tab);
-                            if (!groupKey) {
-                                return;
-                            }
-                            var entry = state.model.groupByName[groupKey];
-                            if (!entry || !entry.standalone || !entry.standaloneWorkspaceId) {
-                                return;
-                            }
-                            openWorkspaceEditDialog(entry.standaloneWorkspaceId);
+
+                state.container = $('<div id="' + CONTAINER_ID + '" class="nr-grouped-flows"></div>');
+                state.container.append('<ul id="' + GROUPS_UL_ID + '"></ul>');
+                state.container.append('<ul id="' + FLOWS_UL_ID + '"></ul>');
+
+                originalWrapper.after(state.container);
+
+                state.groupTabs = RED.tabs.create({
+                    id: GROUPS_UL_ID,
+                    scrollable: true,
+                    sortable: true,
+                    addButton: addFlowEnabled() ? "core:add-flow" : undefined,
+                    addButtonCaption: t("workspace.addFlow", "Add flow"),
+                    menu: buildFlowMenu,
+                    onreorder: function(oldOrder, newOrder) {
+                        debug("group onreorder", {
+                            oldOrder: oldOrder,
+                            newOrder: newOrder
+                        });
+                        applyGroupReorder(newOrder);
+                    },
+                    onchange: function(tab) {
+                        if (state.suspendGroupChange) {
+                            return;
                         }
-                    });
-    
-                    state.flowTabs = RED.tabs.create({
-                        id: FLOWS_UL_ID,
-                        scrollable: true,
-                        sortable: true,
-                        onreorder: function(oldOrder, newOrder) {
-                            debug("flow onreorder", {
-                                oldOrder: oldOrder,
-                                newOrder: newOrder
-                            });
-                            applyFlowReorder(newOrder);
-                        },
-                        onchange: function(tab) {
-                            var workspaceId = getWorkspaceIdForFlowTab(tab);
-                            if (state.suspendFlowChange || !workspaceId) {
-                                return;
-                            }
-                            activateCoreWorkspace(workspaceId);
-                        },
-                        ondblclick: function(tab) {
-                            var workspaceId = getWorkspaceIdForFlowTab(tab);
-                            if (!workspaceId) {
-                                debug("flow ondblclick ignored: missing tab/workspace");
-                                return;
-                            }
-                            debug("flow ondblclick received", {
+                        const groupKey = getGroupKeyForTab(tab);
+                        if (!groupKey) {
+                            debug("group onchange ignored: missing group key", { tab: tab });
+                            return;
+                        }
+                        onGroupChange(groupKey);
+                    },
+                    ondblclick: function(tab) {
+                        const groupKey = getGroupKeyForTab(tab);
+                        if (!groupKey) {
+                            return;
+                        }
+                        const entry = state.model.groupByName[groupKey];
+                        if (!entry || !entry.standalone || !entry.standaloneWorkspaceId) {
+                            return;
+                        }
+                        openWorkspaceEditDialog(entry.standaloneWorkspaceId);
+                    }
+                });
+
+                state.flowTabs = RED.tabs.create({
+                    id: FLOWS_UL_ID,
+                    scrollable: true,
+                    sortable: true,
+                    onreorder: function(oldOrder, newOrder) {
+                        debug("flow onreorder", {
+                            oldOrder: oldOrder,
+                            newOrder: newOrder
+                        });
+                        applyFlowReorder(newOrder);
+                    },
+                    onchange: function(tab) {
+                        const workspaceId = getWorkspaceIdForFlowTab(tab);
+                        if (state.suspendFlowChange || !workspaceId) {
+                            return;
+                        }
+                        activateCoreWorkspace(workspaceId);
+                    },
+                    ondblclick: function(tab) {
+                        const workspaceId = getWorkspaceIdForFlowTab(tab);
+                        if (!workspaceId) {
+                            debug("flow ondblclick ignored: missing tab/workspace");
+                            return;
+                        }
+                        debug("flow ondblclick received", {
+                            workspaceId: workspaceId,
+                            pending: state.pendingFlowDoubleWorkspaceId
+                        });
+                        if (state.pendingFlowDoubleWorkspaceId !== workspaceId) {
+                            debug("flow ondblclick blocked by guard", {
                                 workspaceId: workspaceId,
                                 pending: state.pendingFlowDoubleWorkspaceId
                             });
-                            if (state.pendingFlowDoubleWorkspaceId !== workspaceId) {
-                                debug("flow ondblclick blocked by guard", {
-                                    workspaceId: workspaceId,
-                                    pending: state.pendingFlowDoubleWorkspaceId
-                                });
-                                return;
-                            }
-                            state.pendingFlowDoubleWorkspaceId = null;
-                            debug("flow ondblclick accepted", { workspaceId: workspaceId });
-                            openWorkspaceEditDialog(workspaceId);
+                            return;
                         }
-                    });
-    
-                    bindTabDomEvents();
-                }
-    
+                        state.pendingFlowDoubleWorkspaceId = null;
+                        debug("flow ondblclick accepted", { workspaceId: workspaceId });
+                        openWorkspaceEditDialog(workspaceId);
+                    }
+                });
+
+                bindTabDomEvents();
                 patchEditFlowDialog();
                 state.originalWrapper.hide();
                 state.container.show();
                 $("#" + WORKSPACE_ROOT_ID).addClass(WORKSPACE_ENABLED_CLASS);
                 return true;
             }
-    
+
+            // T019: mount() is now a guard-only check. DOM creation is in setupDOM().
+            function mount() {
+                return !!(state.container && state.container.length);
+            }
+
             function waitForCoreTabs() {
                 if (state.retryTimer) {
                     clearTimeout(state.retryTimer);
                 }
-    
-                if (mount()) {
+
+                if (setupDOM()) {
                     state.retryCount = 0;
                     bindEvents();
                     rebuild();
                     return;
                 }
-    
+
                 state.retryCount += 1;
                 if (!state.didWarnUnavailable && state.retryCount >= WARN_CORE_TABS_RETRY_AT) {
                     state.didWarnUnavailable = true;
                     warn("Grouped tabs plugin loaded, but core workspace tabs were not found.");
                 }
-    
+
                 state.retryTimer = setTimeout(waitForCoreTabs, BOOT_RETRY_INTERVAL_MS);
             }
-    
+
             function start() {
                 waitForCoreTabs();
             }
-    
+
             function stop() {
                 if (state.retryTimer) {
                     clearTimeout(state.retryTimer);
                     state.retryTimer = null;
                 }
-    
+
                 if (state.rebuildTimer) {
                     clearTimeout(state.rebuildTimer);
                     state.rebuildTimer = null;
@@ -1553,59 +1597,37 @@
                     clearTimeout(state.pendingEditOpenTimer);
                     state.pendingEditOpenTimer = null;
                 }
-    
+                if (state.dialogFieldRetryTimer) {
+                    clearTimeout(state.dialogFieldRetryTimer);
+                    state.dialogFieldRetryTimer = null;
+                }
+
                 unbindEvents();
                 unbindTabDomEvents();
                 unpatchEditFlowDialog();
-    
+
                 if (state.container && state.container.length) {
                     state.container.remove();
-                    state.container = null;
                 }
-    
+
                 if (state.originalWrapper && state.originalWrapper.length) {
                     state.originalWrapper.show();
                 }
                 $("#" + WORKSPACE_ROOT_ID).removeClass(WORKSPACE_ENABLED_CLASS);
                 $("#" + WORKSPACE_ROOT_ID).removeClass(WORKSPACE_SINGLE_ROW_CLASS);
-    
-                state.groupTabs = null;
-                state.flowTabs = null;
-                state.model = {
-                    groups: [],
-                    groupByName: {},
-                    workspaceToGroup: {},
-                    activeWorkspaceId: null
-                };
-                state.activeGroup = null;
-                state.lastWorkspaceByGroup = {};
-                state.groupTabGroupMap = {};
-                state.flowTabWorkspaceMap = {};
-                state.lastFlowPointerWorkspaceId = null;
-                state.lastFlowPointerTime = 0;
-                state.pendingFlowDoubleWorkspaceId = null;
-                state.pendingEditOpenTimer = null;
-                state.applyingFlowReorder = false;
-                state.applyingGroupReorder = false;
-                state.skipNextFlowsReorderRebuild = false;
-                state.lastRenderedGroupSignature = "";
-                state.lastRenderedActiveGroup = null;
-                state.lastRenderedFlowGroup = null;
-                state.lastRenderedFlowSignature = "";
-                state.lastRenderedActiveFlowTab = null;
-                state.wrappedEditFlow = null;
-                state.originalEditFlow = null;
-                state.persistedGroups = null;
+
+                // T017: reset all state fields via factory instead of manual enumeration.
+                Object.assign(state, createInitialState());
             }
-    
+
             return {
                 start: start,
                 stop: stop
             };
         }
-    
-        var controller;
-    
+
+        let controller;
+
         function startController() {
             if (controller) {
                 return;
@@ -1616,14 +1638,14 @@
             } catch (err) {
                 controller = null;
                 if (window.console && typeof console.error === "function") {
-                    console.error("[nr-grouped-workspace-tabs] failed to start", err);
+                    console.error("[nr-grouped-flows] failed to start", err);
                 }
-                if (RED.notify && typeof RED.notify === "function") {
+                if (window.RED && RED.notify && typeof RED.notify === "function") {
                     RED.notify("Grouped tabs plugin failed to start. Check browser console.", "error");
                 }
             }
         }
-    
+
         function stopController() {
             if (!controller) {
                 return;
@@ -1631,7 +1653,7 @@
             controller.stop();
             controller = null;
         }
-    
+
         function registerPlugin() {
             if (pluginRegistered) {
                 return;
@@ -1639,7 +1661,7 @@
             if (!window.RED || !RED.plugins || typeof RED.plugins.registerPlugin !== "function") {
                 return;
             }
-    
+
             RED.plugins.registerPlugin(PLUGIN_ID, {
                 onadd: function() {
                     startController();
@@ -1649,25 +1671,28 @@
                 }
             });
             pluginRegistered = true;
-    
-            // Keep a direct startup path for environments where plugin onadd does not fire.
+
+            // Fallback startup path for environments where onadd does not fire synchronously
+            // (some Node-RED versions defer plugin callbacks). startController() is idempotent
+            // via its `if (controller) return` guard, so calling it here is safe even if onadd
+            // already fired.
             if (document.readyState === "loading") {
                 document.addEventListener("DOMContentLoaded", startController);
             } else {
                 startController();
             }
         }
-    
+
         function boot() {
-            var tries = 0;
-    
+            let tries = 0;
+
             function attemptRegister() {
                 registerPlugin();
                 if (pluginRegistered) {
                     if (window.console && typeof console.info === "function") {
-                        console.info("[nr-grouped-workspace-tabs] registered v" + PLUGIN_VERSION);
+                        console.info("[nr-grouped-flows] registered v" + PLUGIN_VERSION);
                         if (isDebugEnabled()) {
-                            console.info("[nr-grouped-workspace-tabs] debug mode active");
+                            console.info("[nr-grouped-flows] debug mode active");
                         }
                     }
                     return;
@@ -1675,29 +1700,29 @@
                 tries += 1;
                 if (tries >= BOOT_MAX_RETRIES) {
                     if (window.console && typeof console.warn === "function") {
-                        console.warn("[nr-grouped-workspace-tabs] failed to register plugin API");
+                        console.warn("[nr-grouped-flows] failed to register plugin API");
                     }
                     return;
                 }
                 setTimeout(attemptRegister, BOOT_RETRY_INTERVAL_MS);
             }
-    
+
             attemptRegister();
         }
-    
+
         if (typeof window !== "undefined") {
             window.nrGroupedTabsDebug = function(enabled) {
                 setDebugEnabled(!!enabled);
                 if (window.console && typeof console.info === "function") {
-                    console.info("[nr-grouped-workspace-tabs] debug " + (enabled ? "enabled" : "disabled") + "; reload the page");
+                    console.info("[nr-grouped-flows] debug " + (enabled ? "enabled" : "disabled") + "; reload the page");
                 }
             };
         }
-    
+
         boot();
     })();
     </script>
-    
+
     <style>
     #nr-grouped-flows {
         display: none;
@@ -1721,21 +1746,26 @@
         margin-top: 2px;
     }
 
+    #red-ui-workspace.nr-grouped-flows-enabled {
+        --nr-grouped-flows-tab-height-dual: 72px;
+        --nr-grouped-flows-tab-height-single: 36px;
+    }
+
     #red-ui-workspace.nr-grouped-flows-enabled #red-ui-workspace-chart {
-        top: 72px;
+        top: var(--nr-grouped-flows-tab-height-dual);
     }
 
     #red-ui-workspace.nr-grouped-flows-enabled #red-ui-workspace-tabs-shade {
-        height: 72px;
+        height: var(--nr-grouped-flows-tab-height-dual);
     }
 
     #red-ui-workspace.nr-grouped-flows-enabled.nr-grouped-flows-single-row #red-ui-workspace-chart {
-        top: 36px;
+        top: var(--nr-grouped-flows-tab-height-single);
     }
 
     #red-ui-workspace.nr-grouped-flows-enabled.nr-grouped-flows-single-row #red-ui-workspace-tabs-shade {
-        height: 36px;
+        height: var(--nr-grouped-flows-tab-height-single);
     }
 
     </style>
-    
+
