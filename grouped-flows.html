@@ -3,7 +3,7 @@
         "use strict";
 
         const PLUGIN_ID = "nr-grouped-flows";
-        const PLUGIN_VERSION = "0.1.31";
+        const PLUGIN_VERSION = "0.3.0";
         const ORIGINAL_UL_ID = "red-ui-workspace-tabs";
         const CONTAINER_ID = "nr-grouped-flows";
         const GROUPS_UL_ID = "nr-grouped-flows-groups";
@@ -15,16 +15,6 @@
         const DIALOG_GROUP_ROW_CLASS = "nr-grouped-flows-group-row";
         const DIALOG_GROUP_INPUT_ID = "nr-grouped-flows-group-input";
         const DIALOG_GROUP_SAVE_NS = ".nrGroupedFlowsGroupSave";
-        const GROUP_PERSISTENCE_KEY = "nr-grouped-flows.groups.v1";
-
-        function getPersistenceKey() {
-            try {
-                const origin = window.location && window.location.origin ? window.location.origin : "";
-                return origin ? GROUP_PERSISTENCE_KEY + "@" + origin : GROUP_PERSISTENCE_KEY;
-            } catch (err) {
-                return GROUP_PERSISTENCE_KEY;
-            }
-        }
         const BOOT_RETRY_INTERVAL_MS = 250;
         const BOOT_MAX_RETRIES = 120;
         const WARN_CORE_TABS_RETRY_AT = 40;
@@ -190,99 +180,43 @@
                 return RED.nodes.workspace(workspaceId);
             }
 
-            function loadPersistedGroups() {
-                try {
-                    if (!window.localStorage) {
-                        return {};
+            function loadGroupsFromServer() {
+                const deferred = $.Deferred();
+                $.ajax({
+                    url: "/nr-grouped-flows/groups",
+                    type: "GET",
+                    dataType: "json"
+                }).then(function(data) {
+                    if (data && typeof data === "object" && !Array.isArray(data)) {
+                        state.persistedGroups = data;
+                    } else {
+                        state.persistedGroups = {};
                     }
-                    const legacyKey = GROUP_PERSISTENCE_KEY;
-                    const newKey = getPersistenceKey();
-                    if (legacyKey !== newKey) {
-                        const legacyData = localStorage.getItem(legacyKey);
-                        if (legacyData && !localStorage.getItem(newKey)) {
-                            localStorage.setItem(newKey, legacyData);
-                            localStorage.removeItem(legacyKey);
-                        }
-                    }
-                    const raw = localStorage.getItem(newKey);
-                    if (!raw) {
-                        return {};
-                    }
-                    const parsed = JSON.parse(raw);
-                    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-                        return {};
-                    }
-                    const groups = {};
-                    Object.keys(parsed).forEach(function(workspaceId) {
-                        const groupName = normalizeGroupName(parsed[workspaceId]);
-                        if (workspaceId && groupName) {
-                            groups[workspaceId] = groupName;
-                        }
-                    });
-                    return groups;
-                } catch (err) {
-                    return {};
-                }
+                    deferred.resolve();
+                }).fail(function() {
+                    warn("Could not load group assignments from server. Groups will be empty.");
+                    state.persistedGroups = {};
+                    deferred.resolve();
+                });
+                return deferred.promise();
             }
 
-            function ensurePersistedGroupsLoaded() {
-                if (!state.persistedGroups) {
-                    state.persistedGroups = loadPersistedGroups();
-                }
-            }
-
-            function savePersistedGroups() {
-                try {
-                    if (!window.localStorage) {
-                        return;
-                    }
-                    localStorage.setItem(getPersistenceKey(), JSON.stringify(state.persistedGroups || {}));
-                } catch (err) {
-                    // Ignore storage write failures.
-                }
-            }
-
-            function getPersistedGroup(workspaceId) {
-                ensurePersistedGroupsLoaded();
-                if (!workspaceId || !state.persistedGroups) {
-                    return "";
-                }
-                return normalizeGroupName(state.persistedGroups[workspaceId]);
-            }
-
-            function setPersistedGroup(workspaceId, groupName) {
-                if (!workspaceId) {
-                    return;
-                }
-                ensurePersistedGroupsLoaded();
-                const normalized = normalizeGroupName(groupName);
-                const oldValue = normalizeGroupName(state.persistedGroups[workspaceId]);
-                if (normalized) {
-                    if (oldValue === normalized) {
-                        return;
-                    }
-                    state.persistedGroups[workspaceId] = normalized;
-                } else if (!oldValue) {
-                    return;
-                } else {
-                    delete state.persistedGroups[workspaceId];
-                }
-                savePersistedGroups();
-            }
-
-            function prunePersistedGroups(validWorkspaceIds) {
-                ensurePersistedGroupsLoaded();
-                if (!state.persistedGroups) {
-                    return false;
-                }
-                let changed = false;
-                Object.keys(state.persistedGroups).forEach(function(workspaceId) {
-                    if (!validWorkspaceIds[workspaceId]) {
-                        delete state.persistedGroups[workspaceId];
-                        changed = true;
+            function saveGroupsToServer() {
+                const payload = {};
+                const groups = state.persistedGroups || {};
+                Object.keys(groups).forEach(function(workspaceId) {
+                    if (groups[workspaceId]) {
+                        payload[workspaceId] = groups[workspaceId];
                     }
                 });
-                return changed;
+                $.ajax({
+                    url: "/nr-grouped-flows/groups",
+                    type: "POST",
+                    contentType: "application/json",
+                    data: JSON.stringify(payload)
+                }).fail(function() {
+                    warn("Failed to save group assignments to server after Deploy.");
+                });
             }
 
             function makeStableGroupTabId(groupName) {
@@ -384,7 +318,7 @@
             }
 
             function buildModel() {
-                ensurePersistedGroupsLoaded();
+                if (!state.persistedGroups) { state.persistedGroups = {}; }
                 const groups = [];
                 const groupByName = {};
                 const workspaceToGroup = {};
@@ -396,7 +330,7 @@
                 coreTabs.forEach(function(item) {
                     validWorkspaceIds[item.workspaceId] = true;
                     if (item.group) {
-                        setPersistedGroup(item.workspaceId, item.group);
+                        state.persistedGroups[item.workspaceId] = item.group;
                     }
                     const flow = {
                         workspaceId: item.workspaceId,
@@ -407,7 +341,9 @@
                         locked: item.locked,
                         changed: item.changed
                     };
-                    const groupName = normalizeGroupName(item.group || getPersistedGroup(item.workspaceId));
+                    const groupName = normalizeGroupName(
+                        item.group || (state.persistedGroups && state.persistedGroups[item.workspaceId]) || ""
+                    );
                     let group;
 
                     if (groupName) {
@@ -445,8 +381,12 @@
                     }
                 });
 
-                if (coreTabs.length && prunePersistedGroups(validWorkspaceIds)) {
-                    savePersistedGroups();
+                if (coreTabs.length && state.persistedGroups) {
+                    Object.keys(state.persistedGroups).forEach(function(workspaceId) {
+                        if (!validWorkspaceIds[workspaceId]) {
+                            delete state.persistedGroups[workspaceId];
+                        }
+                    });
                 }
 
                 return {
@@ -997,7 +937,8 @@
                 }
 
                 const oldValue = normalizeGroupName(
-                    workspace[WORKSPACE_GROUP_PROPERTY] || getPersistedGroup(workspaceId)
+                    workspace[WORKSPACE_GROUP_PROPERTY] ||
+                    (state.persistedGroups && state.persistedGroups[workspaceId]) || ""
                 );
                 const newValue = normalizeGroupName(input.val());
                 if (newValue === oldValue) {
@@ -1009,7 +950,12 @@
                 } else {
                     delete workspace[WORKSPACE_GROUP_PROPERTY];
                 }
-                setPersistedGroup(workspaceId, newValue);
+                if (!state.persistedGroups) { state.persistedGroups = {}; }
+                if (newValue) {
+                    state.persistedGroups[workspaceId] = newValue;
+                } else {
+                    delete state.persistedGroups[workspaceId];
+                }
                 if (RED.nodes && typeof RED.nodes.dirty === "function") {
                     RED.nodes.dirty(true);
                 }
@@ -1074,7 +1020,10 @@
                 }
 
                 row.find("#" + DIALOG_GROUP_INPUT_ID).val(
-                    normalizeGroupName(workspace[WORKSPACE_GROUP_PROPERTY] || getPersistedGroup(workspaceId))
+                    normalizeGroupName(
+                        workspace[WORKSPACE_GROUP_PROPERTY] ||
+                        (state.persistedGroups && state.persistedGroups[workspaceId]) || ""
+                    )
                 );
                 bindDialogGroupSave(workspaceId, form);
                 return true;
@@ -1424,6 +1373,12 @@
                     RED.events.on(name, handler);
                     state.eventBindings.push({ name: name, handler: handler });
                 });
+
+                ["flows:full", "flows:partial"].forEach(function(deployEvent) {
+                    const handler = function() { saveGroupsToServer(); };
+                    RED.events.on(deployEvent, handler);
+                    state.eventBindings.push({ name: deployEvent, handler: handler });
+                });
             }
 
             function unbindEvents() {
@@ -1566,7 +1521,9 @@
                 if (setupDOM()) {
                     state.retryCount = 0;
                     bindEvents();
-                    rebuild();
+                    loadGroupsFromServer().then(function() {
+                        rebuild();
+                    });
                     return;
                 }
 
