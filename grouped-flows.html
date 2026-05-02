@@ -3,7 +3,7 @@
         "use strict";
 
         const PLUGIN_ID = "nr-grouped-flows";
-        const PLUGIN_VERSION = "0.3.2";
+        const PLUGIN_VERSION = "0.4.0";
         const ORIGINAL_UL_ID = "red-ui-workspace-tabs";
         const CONTAINER_ID = "nr-grouped-flows";
         const GROUPS_UL_ID = "nr-grouped-flows-groups";
@@ -99,6 +99,8 @@
                 lastRenderedActiveFlowTab: null,
                 wrappedEditFlow: null,
                 originalEditFlow: null,
+                originalXHROpen: null,
+                originalXHRSend: null,
                 persistedGroups: null
             };
         }
@@ -179,46 +181,6 @@
                     return null;
                 }
                 return RED.nodes.workspace(workspaceId);
-            }
-
-            function loadGroupsFromServer() {
-                const deferred = $.Deferred();
-                $.ajax({
-                    url: adminBase + "/nr-grouped-flows/groups",
-                    type: "GET",
-                    dataType: "json"
-                }).then(function(data) {
-                    if (data && typeof data === "object" && !Array.isArray(data)) {
-                        state.persistedGroups = data;
-                    } else {
-                        state.persistedGroups = {};
-                    }
-                    deferred.resolve();
-                }).fail(function(jqXHR) {
-                    console.warn("[nr-grouped-flows] Could not load group assignments.", jqXHR.status, jqXHR.responseText);
-                    warn("Could not load group assignments from server. Groups will be empty.");
-                    state.persistedGroups = {};
-                    deferred.resolve();
-                });
-                return deferred.promise();
-            }
-
-            function saveGroupsToServer() {
-                const payload = {};
-                const groups = state.persistedGroups || {};
-                Object.keys(groups).forEach(function(workspaceId) {
-                    if (groups[workspaceId]) {
-                        payload[workspaceId] = groups[workspaceId];
-                    }
-                });
-                $.ajax({
-                    url: adminBase + "/nr-grouped-flows/groups",
-                    type: "POST",
-                    contentType: "application/json",
-                    data: JSON.stringify(payload)
-                }).fail(function() {
-                    warn("Failed to save group assignments to server after Deploy.");
-                });
             }
 
             function makeStableGroupTabId(groupName) {
@@ -1086,6 +1048,53 @@
                 $("#dialog-form").off(DIALOG_GROUP_SAVE_NS);
             }
 
+            function patchDeployXHR() {
+                if (state.originalXHROpen) { return; }
+                if (!window.XMLHttpRequest) { return; }
+                const originalOpen = XMLHttpRequest.prototype.open;
+                const originalSend = XMLHttpRequest.prototype.send;
+                state.originalXHROpen = originalOpen;
+                state.originalXHRSend = originalSend;
+                XMLHttpRequest.prototype.open = function(method, url) {
+                    const path = String(url || "").split("?")[0];
+                    this._nrGroupedFlowsDeploy = (
+                        String(method || "").toUpperCase() === "POST" &&
+                        (path === "flows" || path.endsWith("/flows"))
+                    );
+                    return originalOpen.apply(this, arguments);
+                };
+                XMLHttpRequest.prototype.send = function(body) {
+                    if (this._nrGroupedFlowsDeploy && body && typeof body === "string") {
+                        try {
+                            const parsed = JSON.parse(body);
+                            if (parsed && Array.isArray(parsed.flows)) {
+                                parsed.flows.forEach(function(node) {
+                                    if (node.type !== "tab") { return; }
+                                    const group = state.persistedGroups && state.persistedGroups[node.id];
+                                    if (group) {
+                                        node[WORKSPACE_GROUP_PROPERTY] = group;
+                                    } else {
+                                        delete node[WORKSPACE_GROUP_PROPERTY];
+                                    }
+                                });
+                                return originalSend.call(this, JSON.stringify(parsed));
+                            }
+                        } catch (err) {
+                            // Fall through to unmodified send on parse error.
+                        }
+                    }
+                    return originalSend.apply(this, arguments);
+                };
+            }
+
+            function unpatchDeployXHR() {
+                if (!state.originalXHROpen || !state.originalXHRSend) { return; }
+                XMLHttpRequest.prototype.open = state.originalXHROpen;
+                XMLHttpRequest.prototype.send = state.originalXHRSend;
+                state.originalXHROpen = null;
+                state.originalXHRSend = null;
+            }
+
             function bindTabDomEvents() {
                 const groupsUl = $("#" + GROUPS_UL_ID);
                 const flowsUl = $("#" + FLOWS_UL_ID);
@@ -1377,7 +1386,7 @@
                 });
 
                 ["flows:full", "flows:partial"].forEach(function(deployEvent) {
-                    const handler = function() { saveGroupsToServer(); };
+                    const handler = function() { scheduleRebuild(); };
                     RED.events.on(deployEvent, handler);
                     state.eventBindings.push({ name: deployEvent, handler: handler });
                 });
@@ -1522,10 +1531,9 @@
 
                 if (setupDOM()) {
                     state.retryCount = 0;
+                    patchDeployXHR();
                     bindEvents();
-                    loadGroupsFromServer().then(function() {
-                        rebuild();
-                    });
+                    rebuild();
                     return;
                 }
 
@@ -1564,6 +1572,7 @@
                 unbindEvents();
                 unbindTabDomEvents();
                 unpatchEditFlowDialog();
+                unpatchDeployXHR();
 
                 if (state.container && state.container.length) {
                     state.container.remove();
