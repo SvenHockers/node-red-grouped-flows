@@ -3,7 +3,7 @@
         "use strict";
 
         const PLUGIN_ID = "nr-grouped-flows";
-        const PLUGIN_VERSION = "0.4.0";
+        const PLUGIN_VERSION = "0.4.1";
         const ORIGINAL_UL_ID = "red-ui-workspace-tabs";
         const CONTAINER_ID = "nr-grouped-flows";
         const GROUPS_UL_ID = "nr-grouped-flows-groups";
@@ -859,6 +859,52 @@
                 });
             }
 
+            // Injects an explicit close button on every subflow tab.
+            // Bypasses RED.tabs internals; reliable across all NR versions.
+            function injectCloseButtons() {
+                // flows row
+                $("#" + FLOWS_UL_ID + " li.red-ui-tab").each(function() {
+                    const li = $(this);
+                    if (li.find(".nr-grouped-flows-close-btn").length) { return; }
+                    const workspaceId = li.attr("data-workspace-id");
+                    if (!workspaceId) { return; }
+                    if (!(RED.nodes && typeof RED.nodes.subflow === "function" && RED.nodes.subflow(workspaceId))) { return; }
+                    const btn = $("<span>", { "class": "nr-grouped-flows-close-btn", title: "Close subflow" });
+                    btn.on("click", function(e) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (RED.workspaces && typeof RED.workspaces.remove === "function") {
+                            RED.workspaces.remove({ id: workspaceId });
+                        }
+                    });
+                    li.append(btn);
+                });
+
+                // groups row (standalone subflow tabs)
+                $("#" + GROUPS_UL_ID + " li.red-ui-tab").each(function() {
+                    const li = $(this);
+                    if (li.find(".nr-grouped-flows-close-btn").length) { return; }
+                    const href = li.children("a.red-ui-tab-label").attr("href") || "";
+                    if (href.charAt(0) !== "#") { return; }
+                    const groupKey = state.groupTabGroupMap[href.slice(1)];
+                    if (!groupKey) { return; }
+                    const group = state.model.groupByName[groupKey];
+                    if (!group || !group.standalone) { return; }
+                    const workspaceId = group.standaloneWorkspaceId;
+                    if (!workspaceId) { return; }
+                    if (!(RED.nodes && typeof RED.nodes.subflow === "function" && RED.nodes.subflow(workspaceId))) { return; }
+                    const btn = $("<span>", { "class": "nr-grouped-flows-close-btn", title: "Close subflow" });
+                    btn.on("click", function(e) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (RED.workspaces && typeof RED.workspaces.remove === "function") {
+                            RED.workspaces.remove({ id: workspaceId });
+                        }
+                    });
+                    li.append(btn);
+                });
+            }
+
             function resetFlowTabsState() {
                 state.suspendFlowChange = true;
                 clearTabs(state.flowTabs, FLOWS_UL_ID);
@@ -1335,6 +1381,7 @@
 
                 renderGroupTabs();
                 renderFlowTabs(state.activeGroup, false);
+                injectCloseButtons();
             }
 
             function scheduleRebuild() {
@@ -1733,6 +1780,43 @@
 
     #red-ui-workspace.nr-grouped-flows-enabled.nr-grouped-flows-single-row #red-ui-workspace-tabs-shade {
         height: var(--nr-grouped-flows-tab-height-single);
+    }
+
+
+    /* subflow tab close button */
+    #nr-grouped-flows li.red-ui-tab {
+        position: relative;
+    }
+
+    #nr-grouped-flows li.red-ui-tab .nr-grouped-flows-close-btn {
+        display: none;
+        position: absolute;
+        right: 6px;
+        top: 50%;
+        transform: translateY(-50%);
+        width: 14px;
+        height: 14px;
+        line-height: 14px;
+        text-align: center;
+        font-size: 12px;
+        cursor: pointer;
+        border-radius: 3px;
+        z-index: 10;
+        color: inherit;
+        opacity: 0.7;
+    }
+
+    #nr-grouped-flows li.red-ui-tab .nr-grouped-flows-close-btn::after {
+        content: "\00d7";
+    }
+
+    #nr-grouped-flows li.red-ui-tab:hover .nr-grouped-flows-close-btn {
+        display: block;
+    }
+
+    #nr-grouped-flows li.red-ui-tab .nr-grouped-flows-close-btn:hover {
+        opacity: 1;
+        background-color: rgba(0,0,0,0.15);
     }
 
     </style>
