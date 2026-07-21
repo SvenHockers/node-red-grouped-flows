@@ -1,25 +1,23 @@
-# node-red-plugin-grouped-flows (YRoshcha fork)
-
-> This is a fork of [SvenHockers/node-red-grouped-flows](https://github.com/SvenHockers/node-red-grouped-flows),
-> maintained by YRoshcha to add Node-RED 5.x compatibility. The
-> upstream repository's issue tracker is closed to new issues, so fixes
-> are maintained here instead. See [CHANGES.md](./CHANGES.md) for the
-> full patch-by-patch technical writeup, and [NOTICE](./NOTICE) for
-> attribution details.
+# node-red-plugin-grouped-flows
 
 A Node-RED editor plugin that replaces the default single-row flow tab bar with a two-row grouped layout. Flows are organised into named groups; the top row displays group tabs and the bottom row displays the flows belonging to the selected group. Ungrouped flows appear as standalone tabs in the top row.
 
 Group assignments are persisted server-side and shared across all connected editor sessions. Changes take effect for all users after a Deploy, following the same lifecycle as standard flow changes.
 
+The original implementation lives at
+[SvenHockers/node-red-grouped-flows](https://github.com/SvenHockers/node-red-grouped-flows).
+
+This repository includes Node-RED 5.x compatibility updates adapted from
+[YRoshcha's fork](https://github.com/YRoshcha/node-red-grouped-flows).
+See [NOTICE](./NOTICE) for attribution details.
+
 ## Node-RED 5.x compatibility
 
-This fork works unmodified on both Node-RED 4.x and 5.x - the same
-`grouped-flows.html` detects which layout it's running on at mount time
-and adjusts accordingly. If something still looks off on a specific
-NR5.x point release, check CHANGES.md first; several of the fixes here
-are pixel-measurement-based rather than hardcoded, but a few (e.g.
-`--nr-grouped-flows-header-height-*` defaults) may need a nudge via a
-custom theme on unusual setups - see the CSS Customisation section below.
+The current implementation works on both Node-RED 4.x and 5.x. The same
+`grouped-flows.html` detects which layout it is running on at mount time
+and adjusts accordingly. If your theme uses unusual tab sizing, the
+fallback `--nr-grouped-flows-header-height-*` values documented below
+can be overridden.
 
 ## Requirements
 
@@ -31,13 +29,13 @@ custom theme on unusual setups - see the CSS Customisation section below.
 Install via the Node-RED Palette Manager, or from the command line in your Node-RED user directory:
 
 ```
-npm install @yroshcha/node-red-plugin-grouped-flows
+npm install @shockers/node-red-plugin-grouped-flows
 ```
 
-Or from git directly:
+Or from git directly if you want the current repository state:
 
 ```
-npm install github:yroshcha/node-red-grouped-flows
+npm install github:SvenHockers/node-red-grouped-flows
 ```
 
 Restart Node-RED after installation.
@@ -114,4 +112,5 @@ Debug output is written to the browser console under the `[nr-grouped-flows][deb
 
 ## License
 
-Apache-2.0
+Apache-2.0. See [NOTICE](./NOTICE) for attribution on the imported
+Node-RED 5.x compatibility work.

@@ -1,11 +1,14 @@
-node-red-plugin-grouped-flows (YRoshcha fork)
-Copyright original work: Sven Hockers (SvenHockers)
-Copyright modifications: YRoshcha
+node-red-plugin-grouped-flows
+Copyright original work: Sven Hockers
 
-This product is a derivative work of:
-  node-red-grouped-flows
+Original implementation:
   https://github.com/SvenHockers/node-red-grouped-flows
-  Copyright Sven Hockers, licensed under the Apache License, Version 2.0.
+
+This repository includes Node-RED 5.x compatibility changes adapted
+from:
+  node-red-grouped-flows (YRoshcha fork)
+  https://github.com/YRoshcha/node-red-grouped-flows
+  Copyright YRoshcha
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,14 +19,13 @@ You may obtain a copy of the License at
 See the LICENSE file for the full text of the License.
 
 --------------------------------------------------------------------------
-Summary of modifications from upstream v0.4.1
+Summary of imported compatibility changes
 --------------------------------------------------------------------------
 Added Node-RED 5.x editor compatibility, without breaking Node-RED 4.x
-support (single file works on either version). See CHANGES.md for the
-full, patch-by-patch technical writeup. In short, NR5 moved the tab bar
-out of #red-ui-workspace into a new #red-ui-header container that also
-hosts the logo and Deploy button, which this plugin's original DOM/CSS
-assumptions did not account for. Fixes include:
+support (single file works on either version). In short, NR5 moved the
+tab bar out of #red-ui-workspace into a new #red-ui-header container
+that also hosts the logo and Deploy button, which this plugin's
+original DOM/CSS assumptions did not account for. The imported changes:
   - Detect NR4 vs NR5 tab bar location at mount time
   - Correct positioning context for the injected two-row tab bar on NR5
   - Header height now grows to fit the two-row bar without breaking
