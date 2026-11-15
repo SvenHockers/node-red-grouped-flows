@@ -21,6 +21,180 @@
   limitations under the License.
 -->
 <script type="text/javascript">
+    // BEGIN INLINED lib/native-menu-bridge.js
+/*
+ * Native menu forwarding bridge for node-red-plugin-grouped-flows.
+ *
+ * The grouped tab bar contains proxy tabs. Node-RED's workspace menus are
+ * registered against the original, still-connected tab bar. This bridge maps
+ * each proxy flow tab to its canonical native tab and replays the user's
+ * gesture there without moving, cloning, or reconstructing native DOM nodes.
+ */
+(function(root, factory) {
+    "use strict";
+    if (typeof module === "object" && module.exports) {
+        module.exports = factory;
+    } else {
+        root.nrGroupedFlowsNativeMenuBridgeFactory = factory;
+    }
+}(typeof window !== "undefined" ? window : globalThis, function createNativeMenuBridge(options) {
+    "use strict";
+
+    options = options || {};
+    var documentRef = options.document || (typeof document !== "undefined" ? document : null);
+    var container = options.container || null;
+    var started = false;
+
+    function closest(node, selector) {
+        if (!node) { return null; }
+        if (node.nodeType !== 1) { node = node.parentElement; }
+        return node && typeof node.closest === "function" ? node.closest(selector) : null;
+    }
+
+    function contains(ancestor, node) {
+        return !!(ancestor && node && (ancestor === node ||
+            (typeof ancestor.contains === "function" && ancestor.contains(node))));
+    }
+
+    function consume(event) {
+        if (!event) { return; }
+        if (typeof event.preventDefault === "function") { event.preventDefault(); }
+        if (typeof event.stopPropagation === "function") { event.stopPropagation(); }
+        if (typeof event.stopImmediatePropagation === "function") { event.stopImmediatePropagation(); }
+    }
+
+    function mouseEvent(type, source, overrides) {
+        var view = documentRef && documentRef.defaultView;
+        var MouseEventCtor = view && view.MouseEvent;
+        var settings = {
+            bubbles: true,
+            cancelable: true,
+            view: view || null,
+            detail: source && source.detail || 0,
+            screenX: source && source.screenX || 0,
+            screenY: source && source.screenY || 0,
+            clientX: source && source.clientX || 0,
+            clientY: source && source.clientY || 0,
+            ctrlKey: !!(source && source.ctrlKey),
+            altKey: !!(source && source.altKey),
+            shiftKey: !!(source && source.shiftKey),
+            metaKey: !!(source && source.metaKey),
+            button: source && typeof source.button === "number" ? source.button : 0,
+            buttons: source && typeof source.buttons === "number" ? source.buttons : 0,
+            relatedTarget: source && source.relatedTarget || null
+        };
+        Object.keys(overrides || {}).forEach(function(key) {
+            settings[key] = overrides[key];
+        });
+        if (typeof MouseEventCtor !== "function") {
+            throw new Error("MouseEvent is unavailable; native menu forwarding cannot continue.");
+        }
+        return new MouseEventCtor(type, settings);
+    }
+
+    function nativeTabTarget(tab) {
+        if (!tab || typeof tab.querySelector !== "function") { return tab; }
+        return tab.querySelector("a.red-ui-tab-label") || tab;
+    }
+
+    function report(message, data) {
+        if (typeof options.onDebug === "function") {
+            options.onDebug(message, data);
+        }
+    }
+
+    function reportMissing(message) {
+        if (typeof options.onWarning === "function") {
+            options.onWarning(message);
+        }
+    }
+
+    function onContextMenu(event) {
+        var proxyTab = closest(event && event.target, "li.red-ui-tab");
+        if (!contains(container, proxyTab)) { return; }
+
+        var workspaceId = typeof options.resolveWorkspaceId === "function" ?
+            options.resolveWorkspaceId(proxyTab) : "";
+
+        // A group heading has no canonical Node-RED workspace tab. Suppress the
+        // proxy widget's unrelated menu rather than presenting actions for the
+        // wrong flow.
+        if (!workspaceId) {
+            consume(event);
+            report("group context menu suppressed", { proxyTab: proxyTab });
+            return;
+        }
+
+        var nativeTab = typeof options.getNativeTab === "function" ?
+            options.getNativeTab(workspaceId) : null;
+        var target = nativeTabTarget(nativeTab);
+
+        consume(event);
+        if (!target || typeof target.dispatchEvent !== "function") {
+            reportMissing("Grouped tabs could not find the native Node-RED tab for workspace " + workspaceId + ".");
+            return;
+        }
+
+        target.dispatchEvent(mouseEvent("contextmenu", event, {
+            button: 2,
+            buttons: 2
+        }));
+        report("context menu forwarded", { workspaceId: workspaceId, nativeTab: nativeTab });
+    }
+
+    function onClick(event) {
+        var proxyMenuControl = closest(
+            event && event.target,
+            ".red-ui-tab-button.red-ui-tabs-menu > a, .red-ui-tabs-menu > a"
+        );
+        if (!contains(container, proxyMenuControl)) { return; }
+
+        var nativeMenuControl = typeof options.getNativeMenuControl === "function" ?
+            options.getNativeMenuControl() : null;
+
+        consume(event);
+        if (!nativeMenuControl || typeof nativeMenuControl.dispatchEvent !== "function") {
+            reportMissing("Grouped tabs could not find Node-RED's native Tab menu control.");
+            return;
+        }
+
+        nativeMenuControl.dispatchEvent(mouseEvent("click", event, {
+            button: 0,
+            buttons: 0
+        }));
+        report("Tab menu forwarded", { nativeMenuControl: nativeMenuControl });
+    }
+
+    function start() {
+        if (started || !container || typeof container.addEventListener !== "function") {
+            return false;
+        }
+        container.addEventListener("contextmenu", onContextMenu, true);
+        container.addEventListener("click", onClick, true);
+        started = true;
+        return true;
+    }
+
+    function stop() {
+        if (!started || !container || typeof container.removeEventListener !== "function") {
+            return false;
+        }
+        container.removeEventListener("contextmenu", onContextMenu, true);
+        container.removeEventListener("click", onClick, true);
+        started = false;
+        return true;
+    }
+
+    return {
+        start: start,
+        stop: stop,
+        onContextMenu: onContextMenu,
+        onClick: onClick,
+        mouseEvent: mouseEvent
+    };
+}));
+    // END INLINED lib/native-menu-bridge.js
+
     (function() {
         "use strict";
 
@@ -103,6 +277,7 @@
             return {
                 originalWrapper: null,
                 container: null,
+                nativeMenuBridge: null,
                 groupTabs: null,
                 flowTabs: null,
                 model: {
@@ -907,6 +1082,29 @@
                 }, EDIT_DIALOG_DEFER_MS);
             }
 
+            function markGroupTabWorkspaces() {
+                const groupsUl = $("#" + GROUPS_UL_ID);
+                if (!groupsUl.length) {
+                    return;
+                }
+
+                groupsUl.children("li.red-ui-tab").each(function(index, el) {
+                    const li = $(el);
+                    const href = li.children("a.red-ui-tab-label").attr("href") || "";
+                    const tabId = href.charAt(0) === "#" ? href.slice(1) : "";
+                    const groupKey = tabId ? state.groupTabGroupMap[tabId] : "";
+                    const group = groupKey ? state.model.groupByName[groupKey] : null;
+                    const workspaceId = group && group.standalone ? group.standaloneWorkspaceId : "";
+
+                    li.attr("data-nr-grouped-kind", workspaceId ? "flow" : "group");
+                    if (workspaceId) {
+                        li.attr("data-workspace-id", workspaceId);
+                    } else {
+                        li.removeAttr("data-workspace-id");
+                    }
+                });
+            }
+
             function markFlowTabWorkspaces() {
                 const flowsUl = $("#" + FLOWS_UL_ID);
                 if (!flowsUl.length) {
@@ -916,6 +1114,7 @@
                 flowsUl.children("li.red-ui-tab").each(function(index, el) {
                     const li = $(el);
                     const href = li.children("a.red-ui-tab-label").attr("href") || "";
+                    li.attr("data-nr-grouped-kind", "flow");
                     if (href.charAt(0) !== "#") {
                         li.removeAttr("data-workspace-id");
                         return;
@@ -928,6 +1127,76 @@
                         li.removeAttr("data-workspace-id");
                     }
                 });
+            }
+
+            function resolveProxyWorkspaceId(proxyTab) {
+                const li = $(proxyTab);
+                const directWorkspaceId = li.attr("data-workspace-id") || "";
+                if (directWorkspaceId) {
+                    return directWorkspaceId;
+                }
+
+                const href = li.children("a.red-ui-tab-label").attr("href") || "";
+                const tabId = href.charAt(0) === "#" ? href.slice(1) : "";
+                if (!tabId) {
+                    return "";
+                }
+
+                if (li.closest("#" + FLOWS_UL_ID).length) {
+                    return state.flowTabWorkspaceMap[tabId] || "";
+                }
+
+                if (li.closest("#" + GROUPS_UL_ID).length) {
+                    const groupKey = state.groupTabGroupMap[tabId];
+                    const group = groupKey ? state.model.groupByName[groupKey] : null;
+                    return group && group.standalone ? group.standaloneWorkspaceId : "";
+                }
+
+                return "";
+            }
+
+            function getNativeWorkspaceTab(workspaceId) {
+                return document.getElementById("red-ui-tab-" + workspaceId);
+            }
+
+            function getNativeTabMenuControl() {
+                if (!state.originalWrapper || !state.originalWrapper.length) {
+                    return null;
+                }
+                return state.originalWrapper.find(
+                    ".red-ui-tab-button.red-ui-tabs-menu > a, .red-ui-tabs-menu > a"
+                ).first().get(0) || null;
+            }
+
+            function bindNativeMenuForwarding() {
+                if (state.nativeMenuBridge || !state.container || !state.container.length) {
+                    return;
+                }
+                if (typeof window.nrGroupedFlowsNativeMenuBridgeFactory !== "function") {
+                    warn("Grouped tabs native menu bridge did not load.");
+                    return;
+                }
+
+                state.nativeMenuBridge = window.nrGroupedFlowsNativeMenuBridgeFactory({
+                    document: document,
+                    container: state.container.get(0),
+                    resolveWorkspaceId: resolveProxyWorkspaceId,
+                    getNativeTab: getNativeWorkspaceTab,
+                    getNativeMenuControl: getNativeTabMenuControl,
+                    onDebug: function(message, data) {
+                        debug("native menu bridge: " + message, data);
+                    },
+                    onWarning: warn
+                });
+                state.nativeMenuBridge.start();
+            }
+
+            function unbindNativeMenuForwarding() {
+                if (!state.nativeMenuBridge) {
+                    return;
+                }
+                state.nativeMenuBridge.stop();
+                state.nativeMenuBridge = null;
             }
 
             // Injects an explicit close button on every subflow tab.
@@ -1328,6 +1597,7 @@
                     state.suspendGroupChange = false;
                     state.lastRenderedActiveGroup = state.activeGroup;
                 }
+                markGroupTabWorkspaces();
             }
 
             function renderFlowTabs(groupKey, activateFirstIfNeeded) {
@@ -1672,6 +1942,7 @@
                 $("#" + FLOWS_UL_ID).closest(".red-ui-tabs").addClass("nr-grouped-flows-row-flows");
 
                 bindTabDomEvents();
+                bindNativeMenuForwarding();
                 patchEditFlowDialog();
                 state.originalWrapper.hide();
                 state.container.show();
@@ -1731,6 +2002,7 @@
 
                 unbindEvents();
                 unbindTabDomEvents();
+                unbindNativeMenuForwarding();
                 unpatchEditFlowDialog();
                 unpatchDeployXHR();
 
